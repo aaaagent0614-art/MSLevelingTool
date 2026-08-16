@@ -42,14 +42,16 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
 
 
-def _fmt_summary(s: SessionSummary) -> str:
+def _fmt_summary(s: SessionSummary, index: int) -> str:
     diff = s.exp_diff
     diff_s = f"+{diff:,}" if diff is not None else "?"
+    pct_diff = s.exp_pct_diff
+    pct_s = f" (+{pct_diff:.2f}%)" if pct_diff is not None else ""
     start_s = f"{s.start_exp:,}" if s.start_exp is not None else "?"
     end_s = f"{s.end_exp:,}" if s.end_exp is not None else "?"
     return (
-        f"Last session ({s.duration_s / 60:.1f}m): "
-        f"EXP {start_s} -> {end_s} ({diff_s})  "
+        f"#{index} ({s.duration_s / 60:.1f}m): "
+        f"EXP {start_s} -> {end_s} ({diff_s}{pct_s})  "
         f"HP -{s.hp_loss}  MP -{s.mp_loss}"
     )
 
@@ -59,7 +61,7 @@ class OverlayApp:
         self._source = source
         self._ocr = StatPanelOcr()
         self._session = Session()
-        self._last_summary: SessionSummary | None = None
+        self._session_history: list[SessionSummary] = []
 
         self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
 
@@ -67,7 +69,7 @@ class OverlayApp:
         self.root.title("MapleStoryAnalyer")
         self.root.attributes("-topmost", True)
         self.root.configure(bg="black")
-        self.root.geometry("340x355+40+40")
+        self.root.geometry("420x560+40+40")
 
         self._labels: dict[str, tk.Label] = {}
         for key in ("level", "hp", "mp", "exp", "startexp", "session", "expdiff", "eta", "hploss", "mploss", "status"):
@@ -78,11 +80,21 @@ class OverlayApp:
             lbl.pack(fill="x", padx=8, pady=1)
             self._labels[key] = lbl
 
-        self._summary_label = tk.Label(
-            self.root, text="Last session: (none yet)", fg="#7fa8ff", bg="black",
-            font=("Consolas", 10), anchor="w", justify="left", wraplength=320,
+        tk.Label(
+            self.root, text="Session history", fg="#7fa8ff", bg="black",
+            font=("Consolas", 10, "bold"), anchor="w", justify="left",
+        ).pack(fill="x", padx=8, pady=(10, 0))
+
+        history_frame = tk.Frame(self.root, bg="black")
+        history_frame.pack(fill="both", expand=True, padx=8, pady=(2, 4))
+        scrollbar = tk.Scrollbar(history_frame)
+        scrollbar.pack(side="right", fill="y")
+        self._history_text = tk.Text(
+            history_frame, height=6, fg="#7fa8ff", bg="black", font=("Consolas", 9),
+            wrap="word", yscrollcommand=scrollbar.set, state="disabled",
         )
-        self._summary_label.pack(fill="x", padx=8, pady=(10, 1))
+        self._history_text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self._history_text.yview)
 
         self._tick()
 
@@ -126,15 +138,24 @@ class OverlayApp:
             for new, old in zip(vars(snap).values(), vars(self._last).values())
         ))
         self._last = merged
-        self._session.record(merged.exp_cur, merged.hp_cur, merged.mp_cur)
+        self._session.record(merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct)
 
         if self._session.elapsed() >= WINDOW_MIN * 60:
-            self._last_summary = self._session.finalize()
-            print(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(self._last_summary)}", flush=True)
+            summary = self._session.finalize()
+            self._session_history.append(summary)
+            line = _fmt_summary(summary, len(self._session_history))
+            print(f"[{time.strftime('%H:%M:%S')}] {line}", flush=True)
+            self._append_history_line(line)
             self._session.start()
 
         self._render(merged)
         return POLL_MS
+
+    def _append_history_line(self, line: str) -> None:
+        self._history_text.configure(state="normal")
+        self._history_text.insert("end", line + "\n")
+        self._history_text.configure(state="disabled")
+        self._history_text.see("end")
 
     def _render(self, snap: StatSnapshot) -> None:
         self._labels["level"]["text"] = f"LV {snap.level if snap.level is not None else '?'}"
@@ -184,9 +205,6 @@ class OverlayApp:
         # session -- any one of them moving counts as activity, not idle.
         idle = self._session.hp_loss == 0 and self._session.mp_loss == 0 and (exp_diff or 0) == 0
         self._labels["status"]["text"] = "idle" if idle else "tracking"
-
-        if self._last_summary is not None:
-            self._summary_label["text"] = _fmt_summary(self._last_summary)
 
     def run(self) -> None:
         self.root.mainloop()

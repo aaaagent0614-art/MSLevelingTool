@@ -24,12 +24,23 @@ class SessionSummary:
     end_exp: int | None
     hp_loss: int
     mp_loss: int
+    # EXP required for the whole current level, derived once during the
+    # session from a tick that had both cur and pct (cur / (pct/100)) -- see
+    # Session._total_exp. None if no such tick occurred during the session.
+    total_exp: float | None
 
     @property
     def exp_diff(self) -> int | None:
         if self.start_exp is None or self.end_exp is None:
             return None
         return self.end_exp - self.start_exp
+
+    @property
+    def exp_pct_diff(self) -> float | None:
+        diff = self.exp_diff
+        if diff is None or not self.total_exp:
+            return None
+        return diff / self.total_exp * 100
 
     @property
     def duration_s(self) -> float:
@@ -47,6 +58,7 @@ class Session:
         self._exp_cur: int | None = None
         self._hp_cur: int | None = None
         self._mp_cur: int | None = None
+        self._total_exp: float | None = None
 
     def start(self, now: float | None = None) -> None:
         """Begin a new session. Carries forward whatever EXP/HP/MP values are
@@ -58,8 +70,11 @@ class Session:
         self._last_mp = self._mp_cur
         self._hp_loss = 0
         self._mp_loss = 0
+        self._total_exp = None  # re-derived fresh -- could differ after a level-up
 
-    def record(self, exp_cur: int | None, hp_cur: int | None, mp_cur: int | None) -> None:
+    def record(
+        self, exp_cur: int | None, hp_cur: int | None, mp_cur: int | None, exp_pct: float | None = None,
+    ) -> None:
         if self._start_time is None:
             self.start()
         if self._start_exp is None and exp_cur is not None:
@@ -76,6 +91,8 @@ class Session:
             self._mp_cur = mp_cur
         if exp_cur is not None:
             self._exp_cur = exp_cur
+        if exp_cur and exp_pct:
+            self._total_exp = exp_cur / (exp_pct / 100)
 
     def elapsed(self, now: float | None = None) -> float:
         if self._start_time is None:
@@ -100,6 +117,10 @@ class Session:
     def mp_loss(self) -> int:
         return self._mp_loss
 
+    @property
+    def total_exp(self) -> float | None:
+        return self._total_exp
+
     def finalize(self, now: float | None = None) -> SessionSummary:
         end_time = now if now is not None else time.time()
         return SessionSummary(
@@ -109,4 +130,5 @@ class Session:
             end_exp=self._exp_cur,
             hp_loss=self._hp_loss,
             mp_loss=self._mp_loss,
+            total_exp=self._total_exp,
         )
