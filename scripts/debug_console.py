@@ -20,7 +20,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from maple_analyzer.capture import GameWindowCapture
 from maple_analyzer.ocr import StatPanelOcr
-from maple_analyzer.parser import parse_stat_lines
+from maple_analyzer.parser import parse_fields
 
 WAIT_RETRY_S = 2
 
@@ -46,20 +46,19 @@ def main() -> None:
 
     while True:
         try:
-            frame = cap.grab_panel()
+            field_images = cap.grab_fields()
         except RuntimeError as e:
             print(f"[{time.strftime('%H:%M:%S')}] lost game window ({e}); waiting again...")
             wait_for_game(cap)
             continue
 
         t0 = time.perf_counter()
-        lines = ocr.read(frame)
+        field_text = {name: ocr.read_field(img) for name, img in field_images.items()}
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        snap = parse_stat_lines(lines)
+        snap = parse_fields(field_text)
 
         ts = time.strftime("%H:%M:%S")
-        raw = [l.text for l in lines]
-        print(f"[{ts}] ocr={elapsed_ms:.0f}ms  raw={raw}", flush=True)
+        print(f"[{ts}] ocr={elapsed_ms:.0f}ms  fields={field_text}", flush=True)
         print(f"          -> {snap}", flush=True)
 
 

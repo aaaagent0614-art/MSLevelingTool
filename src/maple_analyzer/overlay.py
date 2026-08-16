@@ -1,12 +1,17 @@
 """Always-on-top HUD: capture -> OCR -> parse -> session -> redraw, on a timer.
 
-Measured against the live game (2026-08-17): capture is ~3.5ms, OCR is the real
-cost at ~566ms/frame. `_tick()` runs synchronously then reschedules itself
-POLL_MS later, so the actual cycle is ~566ms + 500ms =~ 1.07s (~0.93Hz), not the
-2Hz the fixed 500ms constant implies on its own -- confirmed fine for this use
-case (HP/MP/EXP don't change fast enough for sub-second precision to matter).
-OCR runs every tick; the pixel-diff skip-check from the spec is not yet
-implemented (see README "Not yet built").
+Per-tick timing (2026-08-17 rework, measured against the live game): the
+original whole-panel detection+recognition OCR pass was ~600-680ms/tick --
+detection (finding text regions) was the entire cost, not recognition. Since
+regions.py's FIELD_BOXES already pins down exactly where each field's text
+is, detection was pure waste; switched to four small recognition-only calls
+(no detection stage) on individually pre-cropped fields, ~15ms each, ~60ms
+total. Capture itself is ~3.5ms. `_tick()` now also computes its own elapsed
+work time and schedules the next call at `TARGET_MS - elapsed`, floored at
+0, instead of the old fixed post-delay (which added TARGET_MS on top of
+whatever the work took, so it could never reach the target rate no matter
+how fast OCR got) -- this is what actually makes the real cycle approach
+TARGET_MS rather than merely bound the *added* delay to it.
 """
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ import tkinter as tk
 from typing import Protocol
 
 from .ocr import StatPanelOcr
-from .parser import StatSnapshot, parse_stat_lines
+from .parser import StatSnapshot, parse_fields
 from .rate import Session, SessionSummary
 
 # The console's codepage (e.g. cp950 Traditional Chinese) can't represent
@@ -26,12 +31,12 @@ from .rate import Session, SessionSummary
 # swaps unencodable characters for '?' instead of crashing.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-POLL_MS = 500
+TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
 WINDOW_MIN = 1  # session length in minutes -- set short for testing
 
 
 class PanelSource(Protocol):
-    def grab_panel(self):
+    def grab_fields(self) -> dict:
         ...
 
 
@@ -124,7 +129,7 @@ class OverlayApp:
         # -- a UnicodeEncodeError from printing a misread OCR character killed
         # the loop, and the HUD sat there silently showing 'idle' while the
         # user kept playing). Every path through this method must reschedule.
-        next_delay = POLL_MS
+        next_delay = TARGET_MS
         try:
             next_delay = self._do_tick()
         except Exception as e:
@@ -133,17 +138,18 @@ class OverlayApp:
         self.root.after(next_delay, self._tick)
 
     def _do_tick(self) -> int:
+        t0 = time.perf_counter()
         try:
-            frame = self._source.grab_panel()
+            field_images = self._source.grab_fields()
         except RuntimeError as e:
             # Game window gone (closed/crashed) or minimized -- don't crash
             # the HUD, show it plainly and keep retrying at a slower pace in
             # case it reopens/is restored.
             self._labels["status"]["text"] = str(e)
             return 2000
-        lines = self._ocr.read(frame)
-        snap = parse_stat_lines(lines)
-        print(f"[{time.strftime('%H:%M:%S')}] raw={[l.text for l in lines]}", flush=True)
+        field_text = {name: self._ocr.read_field(img) for name, img in field_images.items()}
+        snap = parse_fields(field_text)
+        print(f"[{time.strftime('%H:%M:%S')}] fields={field_text}", flush=True)
         print(f"          -> {snap}", flush=True)
         # A single tick occasionally misses a field (combat effects/floating
         # damage numbers over the HP/MP bars, transient OCR confidence dips) --
@@ -163,7 +169,8 @@ class OverlayApp:
             self._finalize_and_restart_session()
 
         self._render(merged)
-        return POLL_MS
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        return max(0, int(TARGET_MS - elapsed_ms))
 
     def _finalize_and_restart_session(self) -> None:
         # Shared by both the timer check above and the manual restart button

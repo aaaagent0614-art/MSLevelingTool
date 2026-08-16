@@ -13,11 +13,24 @@ from dataclasses import dataclass
 
 REFERENCE_CLIENT_SIZE = (1351, 800)  # size of samples/maple_story_ui.jpg
 
-# Whole stat panel, in absolute pixels at REFERENCE_CLIENT_SIZE. OCR runs once on
-# this crop and all fields are parsed out of the result, rather than OCR-ing each
-# field separately -- fewer inference calls, and labels ("HP"/"MP"/"EXP") make
-# unambiguous anchors for the regex/position-based parser.
+# Whole stat panel, in absolute pixels at REFERENCE_CLIENT_SIZE. Grabbed once per
+# tick with a single mss.grab() call; FIELD_BOXES below are sliced out of it
+# in-memory (no extra screen captures).
 STAT_PANEL_BOX = (260, 758, 900, 800)  # (left, top, right, bottom)
+
+# Per-field boxes, same reference frame as STAT_PANEL_BOX, generously padded
+# around each field's label+value text (measured off samples/maple_story_ui.jpg,
+# see commit history for the crop-and-inspect process). Recognition-only OCR
+# (no detection) runs on each of these individually -- see ocr.py's read_field()
+# docstring for why this replaced running detection over the whole panel
+# (detection was ~600ms/call, the actual OCR bottleneck; recognition-only on a
+# small pre-cropped box is ~15ms).
+FIELD_BOXES = {
+    "LV": (278, 774, 362, 799),
+    "HP": (486, 767, 600, 787),
+    "MP": (600, 767, 712, 787),
+    "EXP": (712, 767, 858, 787),
+}
 
 
 @dataclass(frozen=True)

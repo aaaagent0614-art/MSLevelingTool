@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .regions import STAT_PANEL_BOX
+from .regions import FIELD_BOXES, STAT_PANEL_BOX
 
 # EXP text box, measured directly off samples/maple_story_ui.jpg via OCR (see
 # session notes) -- absolute coords, same reference frame as STAT_PANEL_BOX.
@@ -49,6 +49,11 @@ class DemoExpFeed:
         frame = self._render_frame()
         pl, pt, pr, pb = STAT_PANEL_BOX
         return frame.crop((pl, pt, pr, pb))
+
+    def grab_fields(self) -> dict[str, Image.Image]:
+        self._exp += random.randint(*self._exp_per_tick)
+        frame = self._render_frame()
+        return {name: frame.crop(box) for name, box in FIELD_BOXES.items()}
 
     def grab_full(self) -> Image.Image:
         return self._render_frame()

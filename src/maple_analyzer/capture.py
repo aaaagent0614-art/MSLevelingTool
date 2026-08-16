@@ -23,7 +23,7 @@ from typing import Protocol
 
 from PIL import Image
 
-from .regions import STAT_PANEL_BOX, scale_box
+from .regions import FIELD_BOXES, STAT_PANEL_BOX, scale_box
 
 
 class WindowCapture(Protocol):
@@ -33,6 +33,11 @@ class WindowCapture(Protocol):
 
     def grab_panel(self) -> Image.Image:
         """Just the stat panel crop, scaled to the current client size."""
+        ...
+
+    def grab_fields(self) -> dict[str, Image.Image]:
+        """One crop per FIELD_BOXES entry ('LV'/'HP'/'MP'/'EXP'), for
+        recognition-only OCR -- see ocr.py's read_field()."""
         ...
 
 
@@ -48,6 +53,12 @@ class StaticImageCapture:
     def grab_panel(self) -> Image.Image:
         box = scale_box(STAT_PANEL_BOX, self._image.size)
         return self._image.crop(box.as_tuple())
+
+    def grab_fields(self) -> dict[str, Image.Image]:
+        return {
+            name: self._image.crop(scale_box(box, self._image.size).as_tuple())
+            for name, box in FIELD_BOXES.items()
+        }
 
 
 class GameWindowCapture:
@@ -148,6 +159,32 @@ class GameWindowCapture:
             "height": box.bottom - box.top,
         })
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+    def grab_fields(self) -> dict[str, Image.Image]:
+        # One screen grab covering the whole panel (mss itself is cheap, ~3.5ms
+        # measured -- see VERSIONS.md/overlay.py timing notes), then slice each
+        # field out of that single in-memory image rather than four separate
+        # mss.grab() calls.
+        left, top, right, bottom = self._client_rect_on_screen()
+        client_size = (right - left, bottom - top)
+        panel_box = scale_box(STAT_PANEL_BOX, client_size)
+        shot = self._mss.grab({
+            "left": left + panel_box.left,
+            "top": top + panel_box.top,
+            "width": panel_box.right - panel_box.left,
+            "height": panel_box.bottom - panel_box.top,
+        })
+        panel = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+        fields = {}
+        for name, box in FIELD_BOXES.items():
+            field_box = scale_box(box, client_size)
+            local = (
+                field_box.left - panel_box.left, field_box.top - panel_box.top,
+                field_box.right - panel_box.left, field_box.bottom - panel_box.top,
+            )
+            fields[name] = panel.crop(local)
+        return fields
 
 
 def get_capture(sample_path: str | Path | None = None) -> WindowCapture:
