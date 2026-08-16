@@ -116,7 +116,11 @@ class OverlayApp:
         self._labels["hploss"]["text"] = f"HP loss ({WINDOW_MIN}m)  {hp_loss_s}"
         self._labels["mploss"]["text"] = f"MP loss ({WINDOW_MIN}m)  {mp_loss_s}"
 
-        self._labels["status"]["text"] = "idle" if self._exp_diff.is_idle() else "tracking"
+        # Idle only if NONE of HP/MP/EXP have changed recently -- any one of
+        # them moving (e.g. taking damage while EXP happens to be flat) counts
+        # as activity, not idle.
+        all_idle = self._exp_diff.is_idle() and self._hp_loss.is_idle() and self._mp_loss.is_idle()
+        self._labels["status"]["text"] = "idle" if all_idle else "tracking"
 
     def run(self) -> None:
         self.root.mainloop()
