@@ -53,26 +53,63 @@ class StaticImageCapture:
 class GameWindowCapture:
     """Real capture: locates the game window by title and grabs its client area."""
 
-    def __init__(self, title_substring: str = "新楓之谷"):
+    def __init__(self, title_substring: str = "新楓之谷", process_name: str = "Maplestory"):
         if sys.platform != "win32":
             raise RuntimeError("GameWindowCapture requires Windows (pywin32 + real desktop)")
         import mss
+        import win32api
+        import win32con
         import win32gui
+        import win32process
 
         self._win32gui = win32gui
+        self._win32process = win32process
+        self._win32api = win32api
+        self._win32con = win32con
         self._mss = mss.mss()
         self._title_substring = title_substring
+        self._process_name = process_name.lower()
         self._hwnd: int | None = None
 
+    def _owning_process_name(self, hwnd: int) -> str:
+        # Title alone isn't a reliable match: e.g. a browser tab for a wiki page
+        # about the game can also contain the title substring. Require the
+        # window's actual owning process to match too.
+        try:
+            _, pid = self._win32process.GetWindowThreadProcessId(hwnd)
+            # PROCESS_VM_READ is denied for this game (anti-tamper protection) --
+            # PROCESS_QUERY_LIMITED_INFORMATION alone is enough for
+            # GetModuleFileNameEx and works even on protected processes.
+            handle = self._win32api.OpenProcess(
+                self._win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            try:
+                path = self._win32process.GetModuleFileNameEx(handle, 0)
+                return path.rsplit("\\", 1)[-1]
+            finally:
+                self._win32api.CloseHandle(handle)
+        except Exception:
+            return ""
+
+    def _is_match(self, hwnd: int) -> bool:
+        title = self._win32gui.GetWindowText(hwnd)
+        if self._title_substring not in title:
+            return False
+        return self._process_name in self._owning_process_name(hwnd).lower()
+
     def _find_window(self) -> int:
-        if self._hwnd and self._win32gui.IsWindow(self._hwnd):
+        # IsWindow() alone isn't enough: if the game process exits, Windows can
+        # recycle its hwnd number for an unrelated window, and IsWindow() stays
+        # True for that new window -- silently capturing garbage instead of
+        # erroring. Re-check title+process on every call to catch that.
+        if self._hwnd and self._win32gui.IsWindow(self._hwnd) and self._is_match(self._hwnd):
             return self._hwnd
+        self._hwnd = None
 
         found: list[int] = []
 
         def _cb(hwnd: int, _):
-            title = self._win32gui.GetWindowText(hwnd)
-            if self._title_substring in title:
+            if self._is_match(hwnd):
                 found.append(hwnd)
 
         self._win32gui.EnumWindows(_cb, None)
