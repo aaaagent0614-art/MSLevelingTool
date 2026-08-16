@@ -1,19 +1,17 @@
-"""Time-windowed diff/rate tracking, logged as (timestamp, value) samples so it's
+"""Time-windowed diff/loss tracking, logged as (timestamp, value) samples so it's
 robust to variable OCR frequency (we only log on change) and idle periods.
 
 Two different trackers because EXP and HP/MP behave differently:
 
 - EXP only goes up during normal play. A drop means a level-up (EXP resets to 0
-  for the new level), so `ExpRateTracker` treats a drop as a window reset and
-  reports an hourly-extrapolated rate (EXP/hr), which is the meaningful unit for
-  "how fast am I grinding."
-- HP/MP go up *and* down constantly (damage, healing, regen, skill costs) --
-  a drop is normal, not a reset condition. An hourly extrapolation of "current
-  HP" wouldn't mean anything either. What's useful is total movement over a
-  window: `DiffTracker.window_diff()` sums each consecutive tick's delta within
-  the window (net damage taken minus healing received, e.g. -450 over the last
-  minute), which is mathematically the same as last-minus-first in the window
-  but computed the way the analysis is actually framed: per-tick diffs, summed.
+  for the new level), so `DiffTracker(reset_on_drop=True)` treats a drop as a
+  window reset. Reports the plain window diff (value now minus value at the
+  start of the window) -- e.g. "EXP gained in the last 1 min" -- no hourly
+  extrapolation.
+- HP/MP go up *and* down constantly (damage, healing, regen, skill costs). A
+  plain diff would net damage against healing and hide how much was actually
+  lost. `LossTracker` only accumulates the negative side of each per-tick
+  delta -- total HP/MP lost to damage/spend within the window, ignoring gains.
 """
 from __future__ import annotations
 
@@ -59,40 +57,23 @@ class _WindowedLog:
         return (time.time() - self._history[-1].ts) > idle_after_minutes * 60
 
 
-class ExpRateTracker(_WindowedLog):
-    def __init__(self, windows_minutes: tuple[int, ...] = (1, 10, 60), idle_after_minutes: float = 5.0):
-        super().__init__(windows_minutes, reset_on_drop=True)
-        self._idle_after_minutes = idle_after_minutes
-
-    def record(self, exp_cur: int | None) -> None:
-        super().record(exp_cur)
-
-    def is_idle(self) -> bool:
-        return super().is_idle(self._idle_after_minutes)
-
-    def rate_per_hour(self, window_minutes: int) -> float | None:
-        samples = self._window_samples(window_minutes)
-        if len(samples) < 2:
-            return None
-        elapsed = samples[-1].ts - samples[0].ts
-        if elapsed <= 0:
-            return None
-        delta = samples[-1].value - samples[0].value
-        return delta / elapsed * 3600
-
-    def rates(self) -> dict[int, float | None]:
-        return {w: self.rate_per_hour(w) for w in self._windows}
-
-
 class DiffTracker(_WindowedLog):
-    def __init__(self, windows_minutes: tuple[int, ...] = (1, 10, 60)):
-        super().__init__(windows_minutes, reset_on_drop=False)
+    def __init__(self, windows_minutes: tuple[int, ...] = (1, 10, 60), reset_on_drop: bool = False):
+        super().__init__(windows_minutes, reset_on_drop=reset_on_drop)
 
     def window_diff(self, window_minutes: int) -> int | None:
         samples = self._window_samples(window_minutes)
         if len(samples) < 2:
             return None
-        return sum(b.value - a.value for a, b in zip(samples, samples[1:]))
+        return samples[-1].value - samples[0].value
 
-    def diffs(self) -> dict[int, int | None]:
-        return {w: self.window_diff(w) for w in self._windows}
+
+class LossTracker(_WindowedLog):
+    def __init__(self, windows_minutes: tuple[int, ...] = (1, 10, 60)):
+        super().__init__(windows_minutes, reset_on_drop=False)
+
+    def window_loss(self, window_minutes: int) -> int | None:
+        samples = self._window_samples(window_minutes)
+        if len(samples) < 2:
+            return None
+        return sum(max(0, a.value - b.value) for a, b in zip(samples, samples[1:]))

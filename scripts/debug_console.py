@@ -54,8 +54,8 @@ def main() -> None:
 
         ts = time.strftime("%H:%M:%S")
         raw = [l.text for l in lines]
-        print(f"[{ts}] ocr={elapsed_ms:.0f}ms  raw={raw}")
-        print(f"          -> {snap}")
+        print(f"[{ts}] ocr={elapsed_ms:.0f}ms  raw={raw}", flush=True)
+        print(f"          -> {snap}", flush=True)
 
 
 if __name__ == "__main__":

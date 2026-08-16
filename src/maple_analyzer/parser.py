@@ -16,10 +16,10 @@ Only LV had a fallback for it originally, which meant HP/MP silently went
 majority of ticks. Applies uniformly to LV/HP/MP now.
 
 EXP is shown by the game as `cur[percentage%]` together, e.g. `162950[38.05%]`.
-Only `cur` is parsed. The percentage was tried and dropped (2026-08-17): its '.'
-and/or closing ']' are the most OCR-fragile part of the string and it came back
-wrong often enough in live testing to not be worth displaying -- `cur` alone is
-read reliably and is sufficient for rate calculations anyway.
+The '.' and/or closing ']' are the most OCR-fragile part of the string (observed
+dropped in testing, e.g. '4980%' instead of '49.80%') -- normalized by treating
+a bare >=3-digit run before '%' as implying 2 decimal places, since that's this
+game's percentage precision.
 """
 from __future__ import annotations
 
@@ -38,6 +38,11 @@ _PAIR_LABEL_ONLY_RE = {
 }
 _PAIR_VALUE_ONLY_RE = re.compile(r"^\W*(\d+)\D+(\d+)\W*$")
 _EXP_CUR_RE = re.compile(r"EXP\D{0,3}(\d+)", re.IGNORECASE)
+# Percentage is 0-99.99. With the dot intact: 1-2 digits, '.', 1-2 digits.
+# Dot dropped by OCR (common -- see module docstring): 3-4 bare digits, the
+# last 2 being the implied decimals. A bare 1-2 digit run is deliberately NOT
+# matched here since it's ambiguous with stray adjacent OCR noise.
+_EXP_PCT_RE = re.compile(r"(\d{1,2}\.\d{1,2}|\d{3,4})\s*%")
 _LV_RE = re.compile(r"LV\.?\D{0,3}(\d+)", re.IGNORECASE)
 _LV_LABEL_ONLY_RE = re.compile(r"^LV\.?$", re.IGNORECASE)
 
@@ -61,6 +66,15 @@ class StatSnapshot:
     mp_cur: int | None
     mp_max: int | None
     exp_cur: int | None
+    exp_pct: float | None
+
+
+def _normalize_pct(raw: str) -> float:
+    if "." in raw:
+        return float(raw)
+    if len(raw) > 2:
+        return float(f"{raw[:-2]}.{raw[-2:]}")
+    return float(raw)
 
 
 def _find_pair(label: str, lines: list[OcrLine]) -> tuple[int | None, int | None]:
@@ -83,12 +97,15 @@ def _find_pair(label: str, lines: list[OcrLine]) -> tuple[int | None, int | None
     return int(m.group(1)), int(m.group(2))
 
 
-def _find_exp(lines: list[OcrLine]) -> int | None:
+def _find_exp(lines: list[OcrLine]) -> tuple[int | None, float | None]:
     for line in lines:
         m = _EXP_CUR_RE.search(line.text)
         if m:
-            return int(m.group(1))
-    return None
+            cur = int(m.group(1))
+            pm = _EXP_PCT_RE.search(line.text[m.end():])
+            pct = _normalize_pct(pm.group(1)) if pm else None
+            return cur, pct
+    return None, None
 
 
 def _find_level(lines: list[OcrLine]) -> int | None:
@@ -108,11 +125,11 @@ def _find_level(lines: list[OcrLine]) -> int | None:
 def parse_stat_lines(lines: list[OcrLine]) -> StatSnapshot:
     hp_cur, hp_max = _find_pair("HP", lines)
     mp_cur, mp_max = _find_pair("MP", lines)
-    exp_cur = _find_exp(lines)
+    exp_cur, exp_pct = _find_exp(lines)
     level = _find_level(lines)
     return StatSnapshot(
         level=level,
         hp_cur=hp_cur, hp_max=hp_max,
         mp_cur=mp_cur, mp_max=mp_max,
-        exp_cur=exp_cur,
+        exp_cur=exp_cur, exp_pct=exp_pct,
     )

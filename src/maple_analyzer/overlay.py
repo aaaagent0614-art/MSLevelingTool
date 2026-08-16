@@ -10,12 +10,13 @@ implemented (see README "Not yet built").
 """
 from __future__ import annotations
 
+import time
 import tkinter as tk
 from typing import Protocol
 
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, parse_stat_lines
-from .rate import DiffTracker, ExpRateTracker
+from .rate import DiffTracker, LossTracker
 
 POLL_MS = 500
 
@@ -29,20 +30,20 @@ class OverlayApp:
     def __init__(self, source: PanelSource):
         self._source = source
         self._ocr = StatPanelOcr()
-        self._exp_rate = ExpRateTracker()
-        self._hp_diff = DiffTracker()
-        self._mp_diff = DiffTracker()
+        self._exp_diff = DiffTracker(reset_on_drop=True)  # level-up resets EXP to 0
+        self._hp_loss = LossTracker()
+        self._mp_loss = LossTracker()
 
-        self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None)
+        self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
 
         self.root = tk.Tk()
         self.root.title("MapleStoryAnalyer")
         self.root.attributes("-topmost", True)
         self.root.configure(bg="black")
-        self.root.geometry("300x150+40+40")
+        self.root.geometry("300x270+40+40")
 
         self._labels: dict[str, tk.Label] = {}
-        for key in ("level", "hp", "mp", "exp", "rate1", "rate10", "hpmp1", "status"):
+        for key in ("level", "hp", "mp", "exp", "expdiff", "hploss", "mploss", "status"):
             lbl = tk.Label(
                 self.root, text="...", fg="#c8ffb0", bg="black",
                 font=("Consolas", 11), anchor="w", justify="left",
@@ -63,6 +64,8 @@ class OverlayApp:
             return
         lines = self._ocr.read(frame)
         snap = parse_stat_lines(lines)
+        print(f"[{time.strftime('%H:%M:%S')}] raw={[l.text for l in lines]}", flush=True)
+        print(f"          -> {snap}", flush=True)
         # A single tick occasionally misses a field (combat effects/floating
         # damage numbers over the HP/MP bars, transient OCR confidence dips) --
         # observed live: HP briefly read as None while MP/EXP/LV parsed fine on
@@ -75,9 +78,9 @@ class OverlayApp:
             for new, old in zip(vars(snap).values(), vars(self._last).values())
         ))
         self._last = merged
-        self._exp_rate.record(merged.exp_cur)
-        self._hp_diff.record(merged.hp_cur)
-        self._mp_diff.record(merged.mp_cur)
+        self._exp_diff.record(merged.exp_cur)
+        self._hp_loss.record(merged.hp_cur)
+        self._mp_loss.record(merged.mp_cur)
         self._render(merged)
         self.root.after(POLL_MS, self._tick)
 
@@ -85,21 +88,19 @@ class OverlayApp:
         self._labels["level"]["text"] = f"LV {snap.level if snap.level is not None else '?'}"
         self._labels["hp"]["text"] = f"HP  {snap.hp_cur}/{snap.hp_max}" if snap.hp_cur is not None else "HP  --"
         self._labels["mp"]["text"] = f"MP  {snap.mp_cur}/{snap.mp_max}" if snap.mp_cur is not None else "MP  --"
-        self._labels["exp"]["text"] = f"EXP {snap.exp_cur}" if snap.exp_cur is not None else "EXP --"
+        pct = f" ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None else ""
+        self._labels["exp"]["text"] = f"EXP {snap.exp_cur}{pct}" if snap.exp_cur is not None else "EXP --"
 
-        rates = self._exp_rate.rates()
-        r1 = rates.get(1)
-        r10 = rates.get(10)
-        self._labels["rate1"]["text"] = f"EXP/hr (1m avg)  {r1:,.0f}" if r1 is not None else "EXP/hr (1m avg)  --"
-        self._labels["rate10"]["text"] = f"EXP/hr (10m avg) {r10:,.0f}" if r10 is not None else "EXP/hr (10m avg) --"
+        exp1 = self._exp_diff.window_diff(1)
+        exp1_s = f"+{exp1:,}" if exp1 is not None else "--"
+        self._labels["expdiff"]["text"] = f"EXP diff (1m)  {exp1_s}"
 
-        hp1 = self._hp_diff.window_diff(1)
-        mp1 = self._mp_diff.window_diff(1)
-        hp1_s = f"{hp1:+d}" if hp1 is not None else "--"
-        mp1_s = f"{mp1:+d}" if mp1 is not None else "--"
-        self._labels["hpmp1"]["text"] = f"HP/MP diff (1m)  {hp1_s} / {mp1_s}"
+        hp_loss1 = self._hp_loss.window_loss(1)
+        mp_loss1 = self._mp_loss.window_loss(1)
+        self._labels["hploss"]["text"] = f"HP loss (1m)  {hp_loss1 if hp_loss1 is not None else '--'}"
+        self._labels["mploss"]["text"] = f"MP loss (1m)  {mp_loss1 if mp_loss1 is not None else '--'}"
 
-        self._labels["status"]["text"] = "idle" if self._exp_rate.is_idle() else "tracking"
+        self._labels["status"]["text"] = "idle" if self._exp_diff.is_idle() else "tracking"
 
     def run(self) -> None:
         self.root.mainloop()
