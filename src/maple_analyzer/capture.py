@@ -120,6 +120,13 @@ class GameWindowCapture:
 
     def _client_rect_on_screen(self) -> tuple[int, int, int, int]:
         hwnd = self._find_window()
+        if self._win32gui.IsIconic(hwnd):
+            # Minimized windows report a client rect around (-32000, -32000)
+            # with zero size -- mss.grab() throws a raw ScreenShotError on
+            # that instead of anything actionable. Fail clearly here so
+            # callers (the overlay) can show 'game minimized' and retry,
+            # same as the 'game not found' case.
+            raise RuntimeError("game window is minimized")
         left, top, right, bottom = self._win32gui.GetClientRect(hwnd)
         left, top = self._win32gui.ClientToScreen(hwnd, (left, top))
         right, bottom = self._win32gui.ClientToScreen(hwnd, (right, bottom))

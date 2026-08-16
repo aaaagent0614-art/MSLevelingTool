@@ -59,9 +59,10 @@ class OverlayApp:
         try:
             frame = self._source.grab_panel()
         except RuntimeError as e:
-            # Game window gone (closed/crashed) -- don't crash the HUD, show it
-            # plainly and keep retrying at a slower pace in case it reopens.
-            self._labels["status"]["text"] = f"game not found: {e}"
+            # Game window gone (closed/crashed) or minimized -- don't crash
+            # the HUD, show it plainly and keep retrying at a slower pace in
+            # case it reopens/is restored.
+            self._labels["status"]["text"] = str(e)
             self.root.after(2000, self._tick)
             return
         lines = self._ocr.read(frame)
