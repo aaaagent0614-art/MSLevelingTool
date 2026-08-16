@@ -36,15 +36,16 @@ class OverlayApp:
         self._mp_loss = LossTracker()
 
         self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
+        self._start_time = time.time()
 
         self.root = tk.Tk()
         self.root.title("MapleStoryAnalyer")
         self.root.attributes("-topmost", True)
         self.root.configure(bg="black")
-        self.root.geometry("300x270+40+40")
+        self.root.geometry("300x290+40+40")
 
         self._labels: dict[str, tk.Label] = {}
-        for key in ("level", "hp", "mp", "exp", "expdiff", "hploss", "mploss", "status"):
+        for key in ("level", "hp", "mp", "exp", "window", "expdiff", "hploss", "mploss", "status"):
             lbl = tk.Label(
                 self.root, text="...", fg="#c8ffb0", bg="black",
                 font=("Consolas", 11), anchor="w", justify="left",
@@ -91,6 +92,22 @@ class OverlayApp:
         self._labels["mp"]["text"] = f"MP  {snap.mp_cur}/{snap.mp_max}" if snap.mp_cur is not None else "MP  --"
         pct = f" ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None else ""
         self._labels["exp"]["text"] = f"EXP {snap.exp_cur}{pct}" if snap.exp_cur is not None else "EXP --"
+
+        # The diff/loss figures below are only meaningful once a full
+        # WINDOW_MIN worth of history has accumulated since launch (or since
+        # a level-up reset the EXP tracker) -- before that they're based on
+        # whatever partial window exists, which understates the real rate.
+        # Surface that as a fill countdown rather than let '--' or a
+        # too-small number silently look legitimate.
+        window_elapsed = time.time() - self._start_time
+        window_total = WINDOW_MIN * 60
+        if window_elapsed >= window_total:
+            self._labels["window"]["text"] = f"Window: full ({WINDOW_MIN}:00)"
+        else:
+            remaining = window_total - window_elapsed
+            self._labels["window"]["text"] = (
+                f"Window: filling, {int(remaining // 60)}:{int(remaining % 60):02d} left"
+            )
 
         exp5 = self._exp_diff.window_diff(WINDOW_MIN)
         if exp5 is not None:
