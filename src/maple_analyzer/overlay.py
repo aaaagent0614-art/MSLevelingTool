@@ -10,6 +10,7 @@ implemented (see README "Not yet built").
 """
 from __future__ import annotations
 
+import sys
 import time
 import tkinter as tk
 from typing import Protocol
@@ -18,6 +19,13 @@ from .ocr import StatPanelOcr
 from .parser import StatSnapshot, parse_stat_lines
 from .rate import Session, SessionSummary
 
+# The console's codepage (e.g. cp950 Traditional Chinese) can't represent
+# every character OCR might misread out of the game's UI -- printing one
+# used to raise UnicodeEncodeError and silently kill the tick loop (see
+# _tick's try/except below for the other half of this fix). errors="replace"
+# swaps unencodable characters for '?' instead of crashing.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 POLL_MS = 500
 WINDOW_MIN = 1  # session length in minutes -- set short for testing
 
@@ -25,6 +33,13 @@ WINDOW_MIN = 1  # session length in minutes -- set short for testing
 class PanelSource(Protocol):
     def grab_panel(self):
         ...
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
 
 
 def _fmt_summary(s: SessionSummary) -> str:
@@ -52,10 +67,10 @@ class OverlayApp:
         self.root.title("MapleStoryAnalyer")
         self.root.attributes("-topmost", True)
         self.root.configure(bg="black")
-        self.root.geometry("340x330+40+40")
+        self.root.geometry("340x355+40+40")
 
         self._labels: dict[str, tk.Label] = {}
-        for key in ("level", "hp", "mp", "exp", "startexp", "session", "expdiff", "hploss", "mploss", "status"):
+        for key in ("level", "hp", "mp", "exp", "startexp", "session", "expdiff", "eta", "hploss", "mploss", "status"):
             lbl = tk.Label(
                 self.root, text="...", fg="#c8ffb0", bg="black",
                 font=("Consolas", 11), anchor="w", justify="left",
@@ -72,6 +87,21 @@ class OverlayApp:
         self._tick()
 
     def _tick(self) -> None:
+        # Wrapping the whole tick: any unhandled exception here used to abort
+        # this call *before* rescheduling self.root.after(...), permanently
+        # freezing the HUD on stale data with no visible error (observed live
+        # -- a UnicodeEncodeError from printing a misread OCR character killed
+        # the loop, and the HUD sat there silently showing 'idle' while the
+        # user kept playing). Every path through this method must reschedule.
+        next_delay = POLL_MS
+        try:
+            next_delay = self._do_tick()
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] tick error: {e!r}", flush=True)
+            self._labels["status"]["text"] = f"error: {e}"
+        self.root.after(next_delay, self._tick)
+
+    def _do_tick(self) -> int:
         try:
             frame = self._source.grab_panel()
         except RuntimeError as e:
@@ -79,8 +109,7 @@ class OverlayApp:
             # the HUD, show it plainly and keep retrying at a slower pace in
             # case it reopens/is restored.
             self._labels["status"]["text"] = str(e)
-            self.root.after(2000, self._tick)
-            return
+            return 2000
         lines = self._ocr.read(frame)
         snap = parse_stat_lines(lines)
         print(f"[{time.strftime('%H:%M:%S')}] raw={[l.text for l in lines]}", flush=True)
@@ -105,7 +134,7 @@ class OverlayApp:
             self._session.start()
 
         self._render(merged)
-        self.root.after(POLL_MS, self._tick)
+        return POLL_MS
 
     def _render(self, snap: StatSnapshot) -> None:
         self._labels["level"]["text"] = f"LV {snap.level if snap.level is not None else '?'}"
@@ -121,21 +150,32 @@ class OverlayApp:
         self._labels["session"]["text"] = f"Session: {int(remaining // 60)}:{int(remaining % 60):02d} left"
 
         exp_diff = self._session.exp_diff
+        # Total EXP required for the current level isn't shown directly by the
+        # game, but can be derived from any single tick that has both the
+        # absolute value and percentage: total = cur / (pct/100). Anchoring
+        # off the current tick (rather than diffing OCR'd percentages
+        # directly) is more robust since per-level EXP totals are constant,
+        # while independently-read percentages carry their own OCR noise on
+        # top of the cur value's.
+        total_exp = snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
+
         if exp_diff is not None:
-            pct_s = ""
-            # Total EXP required for the current level isn't shown directly by
-            # the game, but can be derived from any single tick that has both
-            # the absolute value and percentage: total = cur / (pct/100).
-            # Anchoring off the current tick (rather than diffing OCR'd
-            # percentages directly) is more robust since per-level EXP totals
-            # are constant, while independently-read percentages carry their
-            # own OCR noise on top of the cur value's.
-            if snap.exp_cur and snap.exp_pct:
-                total_exp = snap.exp_cur / (snap.exp_pct / 100)
-                pct_s = f" (+{exp_diff / total_exp * 100:.2f}%)"
+            pct_s = f" (+{exp_diff / total_exp * 100:.2f}%)" if total_exp else ""
             self._labels["expdiff"]["text"] = f"EXP diff  +{exp_diff:,}{pct_s}"
         else:
             self._labels["expdiff"]["text"] = "EXP diff  --"
+
+        # ETA to level up: current session's EXP/sec rate, projected against
+        # the EXP still needed (total - cur). Needs a few seconds of session
+        # data first -- extrapolating off a 1-2 second sample swings wildly.
+        elapsed = self._session.elapsed()
+        eta_s = None
+        if exp_diff and exp_diff > 0 and elapsed > 3 and total_exp and snap.exp_cur:
+            rate_per_sec = exp_diff / elapsed
+            remaining_exp = total_exp - snap.exp_cur
+            if rate_per_sec > 0:
+                eta_s = remaining_exp / rate_per_sec
+        self._labels["eta"]["text"] = f"Level up ETA  {_fmt_duration(eta_s)}" if eta_s is not None else "Level up ETA  --"
 
         self._labels["hploss"]["text"] = f"HP loss  -{self._session.hp_loss}"
         self._labels["mploss"]["text"] = f"MP loss  -{self._session.mp_loss}"

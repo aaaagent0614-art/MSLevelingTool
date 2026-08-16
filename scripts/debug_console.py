@@ -13,6 +13,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+# The console's codepage (e.g. cp950 Traditional Chinese) can't represent
+# every character OCR might misread out of the game's UI -- printing one
+# would otherwise raise UnicodeEncodeError and kill this loop.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from maple_analyzer.capture import GameWindowCapture
 from maple_analyzer.ocr import StatPanelOcr
 from maple_analyzer.parser import parse_stat_lines
