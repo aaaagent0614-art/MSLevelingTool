@@ -1,79 +1,112 @@
-"""Time-windowed diff/loss tracking, logged as (timestamp, value) samples so it's
-robust to variable OCR frequency (we only log on change) and idle periods.
+"""Fixed-epoch session tracking: values accumulate from an explicit start
+point until the session is finalized and a new one begins, rather than a
+sliding window.
 
-Two different trackers because EXP and HP/MP behave differently:
-
-- EXP only goes up during normal play. A drop means a level-up (EXP resets to 0
-  for the new level), so `DiffTracker(reset_on_drop=True)` treats a drop as a
-  window reset. Reports the plain window diff (value now minus value at the
-  start of the window) -- e.g. "EXP gained in the last 5 min" -- no hourly
-  extrapolation.
-- HP/MP go up *and* down constantly (damage, healing, regen, skill costs). A
-  plain diff would net damage against healing and hide how much was actually
-  lost. `LossTracker` only accumulates the negative side of each per-tick
-  delta -- total HP/MP lost to damage/spend within the window, ignoring gains.
+A rolling window (the original design) shrinks in a confusing way once it's
+been running longer than the window: e.g. a big EXP gain 4 minutes ago ages
+out of a 5-min window even though nothing changed just now, making the
+displayed diff decrease with no corresponding in-game event. A session fixes
+that -- the start values (EXP, HP, MP) are set once and held constant until
+`finalize()` is called, so 'EXP diff' unambiguously means 'since the session
+started', full stop.
 """
 from __future__ import annotations
 
 import time
-from collections import deque
 from dataclasses import dataclass
 
 
 @dataclass
-class Sample:
-    ts: float
-    value: int
+class SessionSummary:
+    start_time: float
+    end_time: float
+    start_exp: int | None
+    end_exp: int | None
+    hp_loss: int
+    mp_loss: int
 
-
-class _WindowedLog:
-    def __init__(self, windows_minutes: tuple[int, ...], reset_on_drop: bool):
-        self._history: deque[Sample] = deque()
-        self._windows = windows_minutes
-        self._reset_on_drop = reset_on_drop
-
-    def record(self, value: int | None) -> None:
-        if value is None:
-            return
-        now = time.time()
-        if self._reset_on_drop and self._history and value < self._history[-1].value:
-            self._history.clear()
-        if not self._history or value != self._history[-1].value:
-            self._history.append(Sample(now, value))
-        self._prune(now)
-
-    def _prune(self, now: float) -> None:
-        cutoff = now - max(self._windows) * 60
-        while self._history and self._history[0].ts < cutoff:
-            self._history.popleft()
-
-    def _window_samples(self, window_minutes: int) -> list[Sample]:
-        cutoff = time.time() - window_minutes * 60
-        return [s for s in self._history if s.ts >= cutoff]
-
-    def is_idle(self, idle_after_minutes: float = 5.0) -> bool:
-        if not self._history:
-            return True
-        return (time.time() - self._history[-1].ts) > idle_after_minutes * 60
-
-
-class DiffTracker(_WindowedLog):
-    def __init__(self, windows_minutes: tuple[int, ...] = (5,), reset_on_drop: bool = False):
-        super().__init__(windows_minutes, reset_on_drop=reset_on_drop)
-
-    def window_diff(self, window_minutes: int) -> int | None:
-        samples = self._window_samples(window_minutes)
-        if len(samples) < 2:
+    @property
+    def exp_diff(self) -> int | None:
+        if self.start_exp is None or self.end_exp is None:
             return None
-        return samples[-1].value - samples[0].value
+        return self.end_exp - self.start_exp
+
+    @property
+    def duration_s(self) -> float:
+        return self.end_time - self.start_time
 
 
-class LossTracker(_WindowedLog):
-    def __init__(self, windows_minutes: tuple[int, ...] = (5,)):
-        super().__init__(windows_minutes, reset_on_drop=False)
+class Session:
+    def __init__(self) -> None:
+        self._start_time: float | None = None
+        self._start_exp: int | None = None
+        self._last_hp: int | None = None
+        self._last_mp: int | None = None
+        self._hp_loss = 0
+        self._mp_loss = 0
+        self._exp_cur: int | None = None
+        self._hp_cur: int | None = None
+        self._mp_cur: int | None = None
 
-    def window_loss(self, window_minutes: int) -> int | None:
-        samples = self._window_samples(window_minutes)
-        if len(samples) < 2:
+    def start(self, now: float | None = None) -> None:
+        """Begin a new session. Carries forward whatever EXP/HP/MP values are
+        already known as the new baseline (so a level-up-triggered or
+        timer-triggered restart doesn't wait a tick to re-establish it)."""
+        self._start_time = now if now is not None else time.time()
+        self._start_exp = self._exp_cur
+        self._last_hp = self._hp_cur
+        self._last_mp = self._mp_cur
+        self._hp_loss = 0
+        self._mp_loss = 0
+
+    def record(self, exp_cur: int | None, hp_cur: int | None, mp_cur: int | None) -> None:
+        if self._start_time is None:
+            self.start()
+        if self._start_exp is None and exp_cur is not None:
+            self._start_exp = exp_cur
+        if hp_cur is not None:
+            if self._last_hp is not None:
+                self._hp_loss += max(0, self._last_hp - hp_cur)
+            self._last_hp = hp_cur
+            self._hp_cur = hp_cur
+        if mp_cur is not None:
+            if self._last_mp is not None:
+                self._mp_loss += max(0, self._last_mp - mp_cur)
+            self._last_mp = mp_cur
+            self._mp_cur = mp_cur
+        if exp_cur is not None:
+            self._exp_cur = exp_cur
+
+    def elapsed(self, now: float | None = None) -> float:
+        if self._start_time is None:
+            return 0.0
+        return (now if now is not None else time.time()) - self._start_time
+
+    @property
+    def start_exp(self) -> int | None:
+        return self._start_exp
+
+    @property
+    def exp_diff(self) -> int | None:
+        if self._start_exp is None or self._exp_cur is None:
             return None
-        return sum(max(0, a.value - b.value) for a, b in zip(samples, samples[1:]))
+        return self._exp_cur - self._start_exp
+
+    @property
+    def hp_loss(self) -> int:
+        return self._hp_loss
+
+    @property
+    def mp_loss(self) -> int:
+        return self._mp_loss
+
+    def finalize(self, now: float | None = None) -> SessionSummary:
+        end_time = now if now is not None else time.time()
+        return SessionSummary(
+            start_time=self._start_time if self._start_time is not None else end_time,
+            end_time=end_time,
+            start_exp=self._start_exp,
+            end_exp=self._exp_cur,
+            hp_loss=self._hp_loss,
+            mp_loss=self._mp_loss,
+        )

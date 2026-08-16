@@ -1,4 +1,4 @@
-"""Always-on-top HUD: capture -> OCR -> parse -> rate -> redraw, on a timer.
+"""Always-on-top HUD: capture -> OCR -> parse -> session -> redraw, on a timer.
 
 Measured against the live game (2026-08-17): capture is ~3.5ms, OCR is the real
 cost at ~566ms/frame. `_tick()` runs synchronously then reschedules itself
@@ -16,10 +16,10 @@ from typing import Protocol
 
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, parse_stat_lines
-from .rate import DiffTracker, LossTracker
+from .rate import Session, SessionSummary
 
 POLL_MS = 500
-WINDOW_MIN = 5
+WINDOW_MIN = 1  # session length in minutes -- set short for testing
 
 
 class PanelSource(Protocol):
@@ -27,31 +27,47 @@ class PanelSource(Protocol):
         ...
 
 
+def _fmt_summary(s: SessionSummary) -> str:
+    diff = s.exp_diff
+    diff_s = f"+{diff:,}" if diff is not None else "?"
+    start_s = f"{s.start_exp:,}" if s.start_exp is not None else "?"
+    end_s = f"{s.end_exp:,}" if s.end_exp is not None else "?"
+    return (
+        f"Last session ({s.duration_s / 60:.1f}m): "
+        f"EXP {start_s} -> {end_s} ({diff_s})  "
+        f"HP -{s.hp_loss}  MP -{s.mp_loss}"
+    )
+
+
 class OverlayApp:
     def __init__(self, source: PanelSource):
         self._source = source
         self._ocr = StatPanelOcr()
-        self._exp_diff = DiffTracker(reset_on_drop=True)  # level-up resets EXP to 0
-        self._hp_loss = LossTracker()
-        self._mp_loss = LossTracker()
+        self._session = Session()
+        self._last_summary: SessionSummary | None = None
 
         self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
-        self._start_time = time.time()
 
         self.root = tk.Tk()
         self.root.title("MapleStoryAnalyer")
         self.root.attributes("-topmost", True)
         self.root.configure(bg="black")
-        self.root.geometry("300x290+40+40")
+        self.root.geometry("340x330+40+40")
 
         self._labels: dict[str, tk.Label] = {}
-        for key in ("level", "hp", "mp", "exp", "window", "expdiff", "hploss", "mploss", "status"):
+        for key in ("level", "hp", "mp", "exp", "startexp", "session", "expdiff", "hploss", "mploss", "status"):
             lbl = tk.Label(
                 self.root, text="...", fg="#c8ffb0", bg="black",
                 font=("Consolas", 11), anchor="w", justify="left",
             )
             lbl.pack(fill="x", padx=8, pady=1)
             self._labels[key] = lbl
+
+        self._summary_label = tk.Label(
+            self.root, text="Last session: (none yet)", fg="#7fa8ff", bg="black",
+            font=("Consolas", 10), anchor="w", justify="left", wraplength=320,
+        )
+        self._summary_label.pack(fill="x", padx=8, pady=(10, 1))
 
         self._tick()
 
@@ -81,9 +97,13 @@ class OverlayApp:
             for new, old in zip(vars(snap).values(), vars(self._last).values())
         ))
         self._last = merged
-        self._exp_diff.record(merged.exp_cur)
-        self._hp_loss.record(merged.hp_cur)
-        self._mp_loss.record(merged.mp_cur)
+        self._session.record(merged.exp_cur, merged.hp_cur, merged.mp_cur)
+
+        if self._session.elapsed() >= WINDOW_MIN * 60:
+            self._last_summary = self._session.finalize()
+            print(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(self._last_summary)}", flush=True)
+            self._session.start()
+
         self._render(merged)
         self.root.after(POLL_MS, self._tick)
 
@@ -94,24 +114,14 @@ class OverlayApp:
         pct = f" ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None else ""
         self._labels["exp"]["text"] = f"EXP {snap.exp_cur}{pct}" if snap.exp_cur is not None else "EXP --"
 
-        # The diff/loss figures below are only meaningful once a full
-        # WINDOW_MIN worth of history has accumulated since launch (or since
-        # a level-up reset the EXP tracker) -- before that they're based on
-        # whatever partial window exists, which understates the real rate.
-        # Surface that as a fill countdown rather than let '--' or a
-        # too-small number silently look legitimate.
-        window_elapsed = time.time() - self._start_time
-        window_total = WINDOW_MIN * 60
-        if window_elapsed >= window_total:
-            self._labels["window"]["text"] = f"Window: full ({WINDOW_MIN}:00)"
-        else:
-            remaining = window_total - window_elapsed
-            self._labels["window"]["text"] = (
-                f"Window: filling, {int(remaining // 60)}:{int(remaining % 60):02d} left"
-            )
+        start_exp = self._session.start_exp
+        self._labels["startexp"]["text"] = f"Start EXP  {start_exp:,}" if start_exp is not None else "Start EXP  --"
 
-        exp5 = self._exp_diff.window_diff(WINDOW_MIN)
-        if exp5 is not None:
+        remaining = max(0.0, WINDOW_MIN * 60 - self._session.elapsed())
+        self._labels["session"]["text"] = f"Session: {int(remaining // 60)}:{int(remaining % 60):02d} left"
+
+        exp_diff = self._session.exp_diff
+        if exp_diff is not None:
             pct_s = ""
             # Total EXP required for the current level isn't shown directly by
             # the game, but can be derived from any single tick that has both
@@ -122,23 +132,21 @@ class OverlayApp:
             # own OCR noise on top of the cur value's.
             if snap.exp_cur and snap.exp_pct:
                 total_exp = snap.exp_cur / (snap.exp_pct / 100)
-                pct_s = f" (+{exp5 / total_exp * 100:.2f}%)"
-            self._labels["expdiff"]["text"] = f"EXP diff ({WINDOW_MIN}m)  +{exp5:,}{pct_s}"
+                pct_s = f" (+{exp_diff / total_exp * 100:.2f}%)"
+            self._labels["expdiff"]["text"] = f"EXP diff  +{exp_diff:,}{pct_s}"
         else:
-            self._labels["expdiff"]["text"] = f"EXP diff ({WINDOW_MIN}m)  --"
+            self._labels["expdiff"]["text"] = "EXP diff  --"
 
-        hp_loss = self._hp_loss.window_loss(WINDOW_MIN)
-        mp_loss = self._mp_loss.window_loss(WINDOW_MIN)
-        hp_loss_s = f"-{hp_loss}" if hp_loss is not None else "--"
-        mp_loss_s = f"-{mp_loss}" if mp_loss is not None else "--"
-        self._labels["hploss"]["text"] = f"HP loss ({WINDOW_MIN}m)  {hp_loss_s}"
-        self._labels["mploss"]["text"] = f"MP loss ({WINDOW_MIN}m)  {mp_loss_s}"
+        self._labels["hploss"]["text"] = f"HP loss  -{self._session.hp_loss}"
+        self._labels["mploss"]["text"] = f"MP loss  -{self._session.mp_loss}"
 
-        # Idle only if NONE of HP/MP/EXP have changed recently -- any one of
-        # them moving (e.g. taking damage while EXP happens to be flat) counts
-        # as activity, not idle.
-        all_idle = self._exp_diff.is_idle() and self._hp_loss.is_idle() and self._mp_loss.is_idle()
-        self._labels["status"]["text"] = "idle" if all_idle else "tracking"
+        # Idle only if NONE of HP/MP/EXP have changed recently within this
+        # session -- any one of them moving counts as activity, not idle.
+        idle = self._session.hp_loss == 0 and self._session.mp_loss == 0 and (exp_diff or 0) == 0
+        self._labels["status"]["text"] = "idle" if idle else "tracking"
+
+        if self._last_summary is not None:
+            self._summary_label["text"] = _fmt_summary(self._last_summary)
 
     def run(self) -> None:
         self.root.mainloop()
