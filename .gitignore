@@ -6,3 +6,4 @@ venv/
 *.sqlite
 *.onnx
 .DS_Store
+overlay_std*.log
