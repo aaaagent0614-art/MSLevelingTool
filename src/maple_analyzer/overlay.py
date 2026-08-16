@@ -12,6 +12,13 @@ work time and schedules the next call at `TARGET_MS - elapsed`, floored at
 whatever the work took, so it could never reach the target rate no matter
 how fast OCR got) -- this is what actually makes the real cycle approach
 TARGET_MS rather than merely bound the *added* delay to it.
+
+UI (2026-08-17 rework): CustomTkinter, three tabs (Live/History/Settings) --
+see ~/.claude/notes/maplestory-analyzer/final-spec-2026-08-17.md Section 3
+for the full spec. This module still only calls Session's public methods and
+reads StatSnapshot/SessionSummary fields -- the capture/OCR/parser engine
+(capture.py/ocr.py/parser.py/regions.py) is untouched by this rework, per
+the hard UI/engine separation rule in that same doc.
 """
 from __future__ import annotations
 
@@ -19,6 +26,8 @@ import sys
 import time
 import tkinter as tk
 from typing import Protocol
+
+import customtkinter as ctk
 
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, parse_fields
@@ -32,7 +41,14 @@ from .rate import Session, SessionSummary
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
-WINDOW_MIN = 1  # session length in minutes -- set short for testing
+WINDOW_MIN = 1  # default session length in minutes -- set short for testing
+
+# Live-tab row order, fixed regardless of which rows are currently hidden --
+# see OverlayApp._apply_visibility().
+_LIVE_ROW_ORDER = (
+    "level", "hp", "mp", "exp", "startexp", "session",
+    "expdiff", "eta", "hploss", "mploss", "status",
+)
 
 
 class PanelSource(Protocol):
@@ -75,52 +91,127 @@ class OverlayApp:
         self._ocr = StatPanelOcr()
         self._session = Session()
         self._session_history: list[SessionSummary] = []
-        # Instance attribute (not the module constant directly) so a future
-        # Settings tab can rebind this per the UI plan without touching how
-        # sessions are tracked -- session length is a UI-layer setting, not
-        # something Session/rate.py needs to know about internally.
+        # Instance attribute (not the module constant directly) so the
+        # Settings tab can rebind this without Session/rate.py needing to
+        # know settings exist -- session length is a UI-layer setting.
         self._window_min = WINDOW_MIN
+
+        # Settings-tab state. Pure UI-layer: the engine keeps tracking every
+        # field regardless of what's shown, these only affect _render().
+        self._show_hp = True
+        self._show_mp = True
+        self._show_exp = True
+        self._show_exp_pct = True
+        self._show_eta = True
 
         self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
 
-        self.root = tk.Tk()
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("dark-blue")
+
+        self.root = ctk.CTk()
         self.root.title("MapleStoryAnalyer")
         self.root.attributes("-topmost", True)
-        self.root.configure(bg="black")
         self.root.geometry("420x600+40+40")
 
-        self._labels: dict[str, tk.Label] = {}
-        for key in ("level", "hp", "mp", "exp", "startexp", "session", "expdiff", "eta", "hploss", "mploss", "status"):
-            lbl = tk.Label(
-                self.root, text="...", fg="#c8ffb0", bg="black",
-                font=("Consolas", 11), anchor="w", justify="left",
-            )
-            lbl.pack(fill="x", padx=8, pady=1)
-            self._labels[key] = lbl
+        self._tabview = ctk.CTkTabview(self.root)
+        self._tabview.pack(fill="both", expand=True, padx=8, pady=8)
+        self._tabview.add("Live")
+        self._tabview.add("History")
+        self._tabview.add("Settings")
 
-        tk.Button(
-            self.root, text="Restart Session", command=self._on_restart_clicked,
-            bg="#222222", fg="#c8ffb0", activebackground="#333333", activeforeground="#c8ffb0",
-            relief="flat", font=("Consolas", 10),
-        ).pack(fill="x", padx=8, pady=(6, 2))
-
-        tk.Label(
-            self.root, text="Session history", fg="#7fa8ff", bg="black",
-            font=("Consolas", 10, "bold"), anchor="w", justify="left",
-        ).pack(fill="x", padx=8, pady=(10, 0))
-
-        history_frame = tk.Frame(self.root, bg="black")
-        history_frame.pack(fill="both", expand=True, padx=8, pady=(2, 4))
-        scrollbar = tk.Scrollbar(history_frame)
-        scrollbar.pack(side="right", fill="y")
-        self._history_text = tk.Text(
-            history_frame, height=6, fg="#7fa8ff", bg="black", font=("Consolas", 9),
-            wrap="word", yscrollcommand=scrollbar.set, state="disabled",
-        )
-        self._history_text.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self._history_text.yview)
+        self._build_live_tab(self._tabview.tab("Live"))
+        self._build_history_tab(self._tabview.tab("History"))
+        self._build_settings_tab(self._tabview.tab("Settings"))
+        self._apply_visibility()
 
         self._tick()
+
+    # ---- tab construction ------------------------------------------------
+
+    def _build_live_tab(self, parent) -> None:
+        self._labels: dict[str, ctk.CTkLabel] = {}
+        for key in _LIVE_ROW_ORDER:
+            lbl = ctk.CTkLabel(
+                parent, text="...", anchor="w",
+                font=ctk.CTkFont(family="Consolas", size=13),
+            )
+            self._labels[key] = lbl
+
+        self._restart_button = ctk.CTkButton(
+            parent, text="Restart Session", command=self._on_restart_clicked,
+        )
+
+    def _build_history_tab(self, parent) -> None:
+        self._history_frame = ctk.CTkScrollableFrame(parent, label_text="Session history")
+        self._history_frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+    def _build_settings_tab(self, parent) -> None:
+        ctk.CTkLabel(
+            parent, text="Session interval (minutes)", anchor="w",
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
+        ).pack(fill="x", padx=12, pady=(16, 0))
+        self._interval_value_label = ctk.CTkLabel(
+            parent, text=f"{self._window_min:.0f} min", anchor="w",
+            font=ctk.CTkFont(family="Consolas", size=12),
+        )
+        self._interval_value_label.pack(fill="x", padx=12)
+        slider = ctk.CTkSlider(
+            parent, from_=1, to=60, number_of_steps=59, command=self._on_interval_changed,
+        )
+        slider.set(self._window_min)
+        slider.pack(fill="x", padx=12, pady=(4, 16))
+
+        ctk.CTkLabel(
+            parent, text="Display", anchor="w",
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
+        ).pack(fill="x", padx=12, pady=(4, 4))
+
+        self._switch_vars: dict[str, tk.BooleanVar] = {}
+        for key, label_text, attr in (
+            ("hp", "Show HP", "_show_hp"),
+            ("mp", "Show MP", "_show_mp"),
+            ("exp", "Show EXP", "_show_exp"),
+            ("exp_pct", "Show EXP percentage", "_show_exp_pct"),
+            ("eta", "Show level-up ETA", "_show_eta"),
+        ):
+            var = tk.BooleanVar(value=getattr(self, attr))
+            self._switch_vars[key] = var
+            ctk.CTkSwitch(
+                parent, text=label_text, variable=var,
+                font=ctk.CTkFont(family="Consolas", size=12),
+                command=lambda k=key, a=attr, v=var: self._on_switch_changed(k, a, v),
+            ).pack(fill="x", padx=12, pady=4)
+
+    # ---- settings callbacks ------------------------------------------------
+
+    def _on_interval_changed(self, value: float) -> None:
+        self._window_min = round(value)
+        self._interval_value_label.configure(text=f"{self._window_min} min")
+        # Doesn't retroactively affect the currently-running session's
+        # already-baked-in target -- takes effect for the *next* session,
+        # same as the interval_minutes recorded on SessionSummary.finalize().
+
+    def _on_switch_changed(self, key: str, attr: str, var: tk.BooleanVar) -> None:
+        setattr(self, attr, var.get())
+        if key != "exp_pct":  # visibility-affecting; exp_pct only changes rendered text
+            self._apply_visibility()
+        self._render(self._last)  # immediate feedback
+
+    def _apply_visibility(self) -> None:
+        visible = {
+            "hp": self._show_hp, "mp": self._show_mp, "exp": self._show_exp,
+            "eta": self._show_eta, "hploss": self._show_hp, "mploss": self._show_mp,
+        }
+        for key in _LIVE_ROW_ORDER:
+            self._labels[key].pack_forget()
+        for key in _LIVE_ROW_ORDER:
+            if visible.get(key, True):
+                self._labels[key].pack(fill="x", padx=8, pady=2)
+        self._restart_button.pack_forget()
+        self._restart_button.pack(fill="x", padx=8, pady=(10, 4))
+
+    # ---- tick loop ---------------------------------------------------------
 
     def _tick(self) -> None:
         # Wrapping the whole tick: any unhandled exception here used to abort
@@ -134,7 +225,7 @@ class OverlayApp:
             next_delay = self._do_tick()
         except Exception as e:
             print(f"[{time.strftime('%H:%M:%S')}] tick error: {e!r}", flush=True)
-            self._labels["status"]["text"] = f"error: {e}"
+            self._labels["status"].configure(text=f"error: {e}")
         self.root.after(next_delay, self._tick)
 
     def _do_tick(self) -> int:
@@ -145,7 +236,7 @@ class OverlayApp:
             # Game window gone (closed/crashed) or minimized -- don't crash
             # the HUD, show it plainly and keep retrying at a slower pace in
             # case it reopens/is restored.
-            self._labels["status"]["text"] = str(e)
+            self._labels["status"].configure(text=str(e))
             return 2000
         field_text = {name: self._ocr.read_field(img) for name, img in field_images.items()}
         snap = parse_fields(field_text)
@@ -196,23 +287,35 @@ class OverlayApp:
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
     def _append_history_line(self, line: str) -> None:
-        self._history_text.configure(state="normal")
-        self._history_text.insert("end", line + "\n")
-        self._history_text.configure(state="disabled")
-        self._history_text.see("end")
+        ctk.CTkLabel(
+            self._history_frame, text=line, anchor="w", justify="left", wraplength=380,
+            font=ctk.CTkFont(family="Consolas", size=11),
+        ).pack(fill="x", padx=4, pady=3)
+
+    # ---- render --------------------------------------------------------
 
     def _render(self, snap: StatSnapshot) -> None:
-        self._labels["level"]["text"] = f"LV {snap.level if snap.level is not None else '?'}"
-        self._labels["hp"]["text"] = f"HP  {snap.hp_cur}/{snap.hp_max}" if snap.hp_cur is not None else "HP  --"
-        self._labels["mp"]["text"] = f"MP  {snap.mp_cur}/{snap.mp_max}" if snap.mp_cur is not None else "MP  --"
-        pct = f" ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None else ""
-        self._labels["exp"]["text"] = f"EXP {snap.exp_cur}{pct}" if snap.exp_cur is not None else "EXP --"
+        self._labels["level"].configure(text=f"LV {snap.level if snap.level is not None else '?'}")
+        self._labels["hp"].configure(
+            text=f"HP  {snap.hp_cur}/{snap.hp_max}" if snap.hp_cur is not None else "HP  --"
+        )
+        self._labels["mp"].configure(
+            text=f"MP  {snap.mp_cur}/{snap.mp_max}" if snap.mp_cur is not None else "MP  --"
+        )
+        pct = f" ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None and self._show_exp_pct else ""
+        self._labels["exp"].configure(
+            text=f"EXP {snap.exp_cur}{pct}" if snap.exp_cur is not None else "EXP --"
+        )
 
         start_exp = self._session.start_exp
-        self._labels["startexp"]["text"] = f"Start EXP  {start_exp:,}" if start_exp is not None else "Start EXP  --"
+        self._labels["startexp"].configure(
+            text=f"Start EXP  {start_exp:,}" if start_exp is not None else "Start EXP  --"
+        )
 
         remaining = max(0.0, self._window_min * 60 - self._session.elapsed())
-        self._labels["session"]["text"] = f"Session: {int(remaining // 60)}:{int(remaining % 60):02d} left"
+        self._labels["session"].configure(
+            text=f"Session: {int(remaining // 60)}:{int(remaining % 60):02d} left"
+        )
 
         exp_diff = self._session.exp_diff
         # Total EXP required for the current level isn't shown directly by the
@@ -225,10 +328,10 @@ class OverlayApp:
         total_exp = snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
 
         if exp_diff is not None:
-            pct_s = f" (+{exp_diff / total_exp * 100:.2f}%)" if total_exp else ""
-            self._labels["expdiff"]["text"] = f"EXP diff  +{exp_diff:,}{pct_s}"
+            pct_s = f" (+{exp_diff / total_exp * 100:.2f}%)" if total_exp and self._show_exp_pct else ""
+            self._labels["expdiff"].configure(text=f"EXP diff  +{exp_diff:,}{pct_s}")
         else:
-            self._labels["expdiff"]["text"] = "EXP diff  --"
+            self._labels["expdiff"].configure(text="EXP diff  --")
 
         # ETA to level up: current session's EXP/sec rate, projected against
         # the EXP still needed (total - cur). Needs a few seconds of session
@@ -240,15 +343,17 @@ class OverlayApp:
             remaining_exp = total_exp - snap.exp_cur
             if rate_per_sec > 0:
                 eta_s = remaining_exp / rate_per_sec
-        self._labels["eta"]["text"] = f"Level up ETA  {_fmt_duration(eta_s)}" if eta_s is not None else "Level up ETA  --"
+        self._labels["eta"].configure(
+            text=f"Level up ETA  {_fmt_duration(eta_s)}" if eta_s is not None else "Level up ETA  --"
+        )
 
-        self._labels["hploss"]["text"] = f"HP loss  -{self._session.hp_loss}"
-        self._labels["mploss"]["text"] = f"MP loss  -{self._session.mp_loss}"
+        self._labels["hploss"].configure(text=f"HP loss  -{self._session.hp_loss}")
+        self._labels["mploss"].configure(text=f"MP loss  -{self._session.mp_loss}")
 
         # Idle only if NONE of HP/MP/EXP have changed recently within this
         # session -- any one of them moving counts as activity, not idle.
         idle = self._session.hp_loss == 0 and self._session.mp_loss == 0 and (exp_diff or 0) == 0
-        self._labels["status"]["text"] = "idle" if idle else "tracking"
+        self._labels["status"].configure(text="idle" if idle else "tracking")
 
     def run(self) -> None:
         self.root.mainloop()

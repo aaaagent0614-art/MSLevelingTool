@@ -1,3 +1,5 @@
+customtkinter==6.0.0
+darkdetect==0.8.0
 flatbuffers==25.12.19
 mss==10.2.0
 numpy==2.4.6
