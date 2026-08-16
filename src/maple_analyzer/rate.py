@@ -16,8 +16,19 @@ import time
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True)
 class SessionSummary:
+    """A finalized, immutable record of one completed session.
+
+    Every field is a JSON/SQLite-primitive (float, int, or None) and there
+    are no references to Session, StatSnapshot, or anything OCR/UI-related --
+    this is deliberately the shape a future persistence layer would store and
+    a future UI would read, decoupled from how it's produced or displayed.
+    See ~/.claude/notes/maplestory-analyzer/ui-plan-2026-08-17.md for the
+    plan to add that persistence layer and a session-history browser on top
+    of this struct, without touching the capture/OCR/parser engine.
+    """
+
     start_time: float
     end_time: float
     start_exp: int | None
