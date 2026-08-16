@@ -29,6 +29,8 @@ class OverlayApp:
         self._ocr = StatPanelOcr()
         self._rate = ExpRateTracker()
 
+        self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
+
         self.root = tk.Tk()
         self.root.title("MapleStoryAnalyer")
         self.root.attributes("-topmost", True)
@@ -50,8 +52,20 @@ class OverlayApp:
         frame = self._source.grab_panel()
         lines = self._ocr.read(frame)
         snap = parse_stat_lines(lines)
-        self._rate.record(snap.exp_cur, snap.level)
-        self._render(snap)
+        # A single tick occasionally misses a field (combat effects/floating
+        # damage numbers over the HP/MP bars, transient OCR confidence dips) --
+        # observed live: HP briefly read as None while MP/EXP/LV parsed fine on
+        # the same frame. Carry forward the last known value per field instead
+        # of flickering to '--' on every miss; a field that's genuinely gone
+        # (e.g. OCR permanently broken) will just show stale data, which is a
+        # more honest failure mode than a blank field for a live number.
+        merged = StatSnapshot(*(
+            new if new is not None else old
+            for new, old in zip(vars(snap).values(), vars(self._last).values())
+        ))
+        self._last = merged
+        self._rate.record(merged.exp_cur, merged.level)
+        self._render(merged)
         self.root.after(POLL_MS, self._tick)
 
     def _render(self, snap: StatSnapshot) -> None:

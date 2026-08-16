@@ -8,27 +8,32 @@ Full spec: `~/.claude/notes/maplestory-analyzer/spec-draft-2026-08-17.md`
 
 ## Status
 
-Spec drafted. Confirmed client: MapleStory Worlds — 新楓之谷:經典版 (Artale/Classic),
-Traditional Chinese UI. Sample screenshot in `samples/maple_story_ui.jpg`.
+**Verified working live against the real game** (2026-08-17): capture -> OCR ->
+parse -> rate -> overlay HUD all confirmed correct on Windows, reading real
+LV/HP/MP/EXP off the actual `新楓之谷：經典版` client window and tracking a real
+level-up event (EXP absolute value kept climbing while % reset, as expected).
+
+Client: MapleStory Worlds — 新楓之谷:經典版 (Artale/Classic), Traditional Chinese UI.
+Sample screenshot in `samples/maple_story_ui.jpg`.
 
 Confirmed stat bar format (bottom-left panel):
 - `LV.` — plain integer
 - HP: `[cur/max]`, e.g. `[377/824]`
 - MP: `[cur/max]`, e.g. `[1663/2816]`
 - EXP: `cur[percentage%]`, e.g. `162950[38.05%]` — absolute value AND percentage
-  shown together, not either/or as originally assumed. Parser should extract both
-  and use whichever is more precise (absolute cur value) as the primary signal.
+  shown together, not either/or as originally assumed. Parser extracts both and
+  uses the absolute cur value as the primary signal (it OCRs more reliably than
+  the percentage's punctuation).
 
-## Status
-
-Capture/OCR/parse/rate/overlay pipeline scaffolded and working end-to-end against
-the sample screenshot (via a synthetic frame feed, since dev happens off-Windows —
-see `demo_feed.py`). Not yet wired to a real Windows game window or tested there.
+Known rough edge, fixed: single-tick OCR misses on individual fields (e.g. HP
+briefly unreadable under combat effects) used to flash the HUD field to `--`;
+the overlay now carries forward the last known value per field instead.
 
 ## Setup
 
-See `VERSIONS.md` for the pinned Python 3.11.11 + locked dependency set and the
-Linux-dev vs. Windows-runtime setup steps.
+**Windows is the primary dev/runtime target** (real capture requires pywin32 + a
+live Win32 desktop). See `VERSIONS.md` for the pinned versions (Windows: Python
+3.10; Linux/WSL: 3.11.11, OCR/parser prototyping only) and full setup steps.
 
 ## Try it (dev/demo mode, no game needed)
 
@@ -75,9 +80,8 @@ client's window title differs).
 ## Not yet built (from spec, still open)
 
 - Anchor template-matching for resolution/DPI-independent crop boxes (currently
-  fixed pixel boxes calibrated to the one sample screenshot's resolution)
+  fixed pixel boxes, linearly scaled from the one sample screenshot's resolution —
+  works in practice at 1366x768 but is a stopgap, not the real plan)
 - Pixel-diff skip-check before re-running OCR (currently OCR runs every tick)
 - SQLite session logging
 - Session summaries / map-context tagging
-- Verifying `GameWindowCapture` against the actual live game window (untested —
-  no Windows machine in this dev environment)
