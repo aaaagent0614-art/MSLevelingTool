@@ -1,0 +1,10 @@
+# Top-level dependencies. See requirements.lock.txt for the exact pinned,
+# reproducible set (generated via `pip freeze` inside .venv).
+numpy
+opencv-python-headless
+pillow
+mss
+rapidocr-onnxruntime
+
+# Windows-only: window enumeration / client-rect lookup for targeted capture.
+pywin32; sys_platform == "win32"
