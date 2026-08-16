@@ -6,7 +6,7 @@ Two different trackers because EXP and HP/MP behave differently:
 - EXP only goes up during normal play. A drop means a level-up (EXP resets to 0
   for the new level), so `DiffTracker(reset_on_drop=True)` treats a drop as a
   window reset. Reports the plain window diff (value now minus value at the
-  start of the window) -- e.g. "EXP gained in the last 1 min" -- no hourly
+  start of the window) -- e.g. "EXP gained in the last 5 min" -- no hourly
   extrapolation.
 - HP/MP go up *and* down constantly (damage, healing, regen, skill costs). A
   plain diff would net damage against healing and hide how much was actually
@@ -58,7 +58,7 @@ class _WindowedLog:
 
 
 class DiffTracker(_WindowedLog):
-    def __init__(self, windows_minutes: tuple[int, ...] = (1, 10, 60), reset_on_drop: bool = False):
+    def __init__(self, windows_minutes: tuple[int, ...] = (5,), reset_on_drop: bool = False):
         super().__init__(windows_minutes, reset_on_drop=reset_on_drop)
 
     def window_diff(self, window_minutes: int) -> int | None:
@@ -69,7 +69,7 @@ class DiffTracker(_WindowedLog):
 
 
 class LossTracker(_WindowedLog):
-    def __init__(self, windows_minutes: tuple[int, ...] = (1, 10, 60)):
+    def __init__(self, windows_minutes: tuple[int, ...] = (5,)):
         super().__init__(windows_minutes, reset_on_drop=False)
 
     def window_loss(self, window_minutes: int) -> int | None:

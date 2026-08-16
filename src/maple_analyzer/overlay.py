@@ -19,6 +19,7 @@ from .parser import StatSnapshot, parse_stat_lines
 from .rate import DiffTracker, LossTracker
 
 POLL_MS = 500
+WINDOW_MIN = 5
 
 
 class PanelSource(Protocol):
@@ -91,14 +92,29 @@ class OverlayApp:
         pct = f" ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None else ""
         self._labels["exp"]["text"] = f"EXP {snap.exp_cur}{pct}" if snap.exp_cur is not None else "EXP --"
 
-        exp1 = self._exp_diff.window_diff(1)
-        exp1_s = f"+{exp1:,}" if exp1 is not None else "--"
-        self._labels["expdiff"]["text"] = f"EXP diff (1m)  {exp1_s}"
+        exp5 = self._exp_diff.window_diff(WINDOW_MIN)
+        if exp5 is not None:
+            pct_s = ""
+            # Total EXP required for the current level isn't shown directly by
+            # the game, but can be derived from any single tick that has both
+            # the absolute value and percentage: total = cur / (pct/100).
+            # Anchoring off the current tick (rather than diffing OCR'd
+            # percentages directly) is more robust since per-level EXP totals
+            # are constant, while independently-read percentages carry their
+            # own OCR noise on top of the cur value's.
+            if snap.exp_cur and snap.exp_pct:
+                total_exp = snap.exp_cur / (snap.exp_pct / 100)
+                pct_s = f" (+{exp5 / total_exp * 100:.2f}%)"
+            self._labels["expdiff"]["text"] = f"EXP diff ({WINDOW_MIN}m)  +{exp5:,}{pct_s}"
+        else:
+            self._labels["expdiff"]["text"] = f"EXP diff ({WINDOW_MIN}m)  --"
 
-        hp_loss1 = self._hp_loss.window_loss(1)
-        mp_loss1 = self._mp_loss.window_loss(1)
-        self._labels["hploss"]["text"] = f"HP loss (1m)  {hp_loss1 if hp_loss1 is not None else '--'}"
-        self._labels["mploss"]["text"] = f"MP loss (1m)  {mp_loss1 if mp_loss1 is not None else '--'}"
+        hp_loss = self._hp_loss.window_loss(WINDOW_MIN)
+        mp_loss = self._mp_loss.window_loss(WINDOW_MIN)
+        hp_loss_s = f"-{hp_loss}" if hp_loss is not None else "--"
+        mp_loss_s = f"-{mp_loss}" if mp_loss is not None else "--"
+        self._labels["hploss"]["text"] = f"HP loss ({WINDOW_MIN}m)  {hp_loss_s}"
+        self._labels["mploss"]["text"] = f"MP loss ({WINDOW_MIN}m)  {mp_loss_s}"
 
         self._labels["status"]["text"] = "idle" if self._exp_diff.is_idle() else "tracking"
 
