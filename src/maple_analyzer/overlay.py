@@ -49,8 +49,16 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
     pct_s = f" (+{pct_diff:.2f}%)" if pct_diff is not None else ""
     start_s = f"{s.start_exp:,}" if s.start_exp is not None else "?"
     end_s = f"{s.end_exp:,}" if s.end_exp is not None else "?"
+    dur_min = s.duration_s / 60
+    # Duration and the configured interval only differ when a session was
+    # manually restarted before its timer fired -- show both then, so a cut-
+    # short session doesn't silently look like a full one in the history.
+    if s.interval_minutes is not None and abs(dur_min - s.interval_minutes) > 0.05:
+        dur_s = f"{dur_min:.1f}m of {s.interval_minutes:.0f}m, restarted early"
+    else:
+        dur_s = f"{dur_min:.1f}m"
     return (
-        f"#{index} ({s.duration_s / 60:.1f}m): "
+        f"#{index} ({dur_s}): "
         f"EXP {start_s} -> {end_s} ({diff_s}{pct_s})  "
         f"HP -{s.hp_loss}  MP -{s.mp_loss}"
     )
@@ -62,6 +70,11 @@ class OverlayApp:
         self._ocr = StatPanelOcr()
         self._session = Session()
         self._session_history: list[SessionSummary] = []
+        # Instance attribute (not the module constant directly) so a future
+        # Settings tab can rebind this per the UI plan without touching how
+        # sessions are tracked -- session length is a UI-layer setting, not
+        # something Session/rate.py needs to know about internally.
+        self._window_min = WINDOW_MIN
 
         self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
 
@@ -69,7 +82,7 @@ class OverlayApp:
         self.root.title("MapleStoryAnalyer")
         self.root.attributes("-topmost", True)
         self.root.configure(bg="black")
-        self.root.geometry("420x560+40+40")
+        self.root.geometry("420x600+40+40")
 
         self._labels: dict[str, tk.Label] = {}
         for key in ("level", "hp", "mp", "exp", "startexp", "session", "expdiff", "eta", "hploss", "mploss", "status"):
@@ -79,6 +92,12 @@ class OverlayApp:
             )
             lbl.pack(fill="x", padx=8, pady=1)
             self._labels[key] = lbl
+
+        tk.Button(
+            self.root, text="Restart Session", command=self._on_restart_clicked,
+            bg="#222222", fg="#c8ffb0", activebackground="#333333", activeforeground="#c8ffb0",
+            relief="flat", font=("Consolas", 10),
+        ).pack(fill="x", padx=8, pady=(6, 2))
 
         tk.Label(
             self.root, text="Session history", fg="#7fa8ff", bg="black",
@@ -140,16 +159,34 @@ class OverlayApp:
         self._last = merged
         self._session.record(merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct)
 
-        if self._session.elapsed() >= WINDOW_MIN * 60:
-            summary = self._session.finalize()
+        if self._session.elapsed() >= self._window_min * 60:
+            self._finalize_and_restart_session()
+
+        self._render(merged)
+        return POLL_MS
+
+    def _finalize_and_restart_session(self) -> None:
+        # Shared by both the timer check above and the manual restart button
+        # -- exactly one code path finalizes+logs+restarts, so a button click
+        # landing on the same tick as the timer firing can't double-log.
+        # Skip logging if the session never got a real EXP reading (restart
+        # clicked immediately after launch, before OCR produced anything --
+        # a '? -> ?' entry would just be noise), or if essentially no time
+        # passed (rapid double-click on the restart button after real data
+        # already exists -- start() carries the last known values forward,
+        # so a second click 50ms later would otherwise log a valid-looking
+        # but meaningless 0-duration, 0-diff entry).
+        if self._session.start_exp is not None and self._session.elapsed() >= 1.0:
+            summary = self._session.finalize(self._window_min)
             self._session_history.append(summary)
             line = _fmt_summary(summary, len(self._session_history))
             print(f"[{time.strftime('%H:%M:%S')}] {line}", flush=True)
             self._append_history_line(line)
-            self._session.start()
+        self._session.start()
 
-        self._render(merged)
-        return POLL_MS
+    def _on_restart_clicked(self) -> None:
+        self._finalize_and_restart_session()
+        self._render(self._last)  # immediate feedback, don't wait for next tick
 
     def _append_history_line(self, line: str) -> None:
         self._history_text.configure(state="normal")
@@ -167,7 +204,7 @@ class OverlayApp:
         start_exp = self._session.start_exp
         self._labels["startexp"]["text"] = f"Start EXP  {start_exp:,}" if start_exp is not None else "Start EXP  --"
 
-        remaining = max(0.0, WINDOW_MIN * 60 - self._session.elapsed())
+        remaining = max(0.0, self._window_min * 60 - self._session.elapsed())
         self._labels["session"]["text"] = f"Session: {int(remaining // 60)}:{int(remaining % 60):02d} left"
 
         exp_diff = self._session.exp_diff

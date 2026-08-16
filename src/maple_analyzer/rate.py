@@ -39,6 +39,13 @@ class SessionSummary:
     # session from a tick that had both cur and pct (cur / (pct/100)) -- see
     # Session._total_exp. None if no such tick occurred during the session.
     total_exp: float | None
+    # The session-length *setting* in effect when this session ended -- not
+    # necessarily equal to duration_s. They differ whenever a session is
+    # manually restarted before the timer fires, or (once the settings UI
+    # exists) the interval setting is changed between sessions -- recording
+    # it here means a saved/displayed session stays self-describing even if
+    # the live setting has since changed.
+    interval_minutes: float | None
 
     @property
     def exp_diff(self) -> int | None:
@@ -132,7 +139,7 @@ class Session:
     def total_exp(self) -> float | None:
         return self._total_exp
 
-    def finalize(self, now: float | None = None) -> SessionSummary:
+    def finalize(self, interval_minutes: float | None = None, now: float | None = None) -> SessionSummary:
         end_time = now if now is not None else time.time()
         return SessionSummary(
             start_time=self._start_time if self._start_time is not None else end_time,
@@ -142,4 +149,5 @@ class Session:
             hp_loss=self._hp_loss,
             mp_loss=self._mp_loss,
             total_exp=self._total_exp,
+            interval_minutes=interval_minutes,
         )
