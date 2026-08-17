@@ -12,6 +12,12 @@ to your next level.
 Read-only: it only looks at your screen, it never clicks, types, or sends
 anything to the game.
 
+![MapleStoryAnalyer running alongside the game](docs/screenshot.jpg)
+
+*(HUD shown in Chinese — switch to English any time in Settings.)*
+
+▶️ **[Demo video](https://youtu.be/Joqzcg6g798)** — see it running live.
+
 ## Features
 
 - **Live tracking** — LV/HP/MP/EXP update about twice a second, with a
