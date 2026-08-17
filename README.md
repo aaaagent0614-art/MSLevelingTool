@@ -1,72 +1,64 @@
 # MapleStoryAnalyer
 
-A small always-on-top HUD that watches your MapleStory game window and tracks
-your HP, MP, EXP, and Level in real time. It uses OCR (optical character
-recognition) to read the stat numbers straight off your screen — no typing,
-no macros, no game files or memory access. Use it to see how much EXP/HP/MP
-you're burning per grinding session, compare sessions, and get a rough ETA
-to your next level.
+*[English README](README.en.md)*
 
-Read-only: it only looks at your screen, it never clicks, types, or sends
-anything to the game.
+即時追蹤楓之谷遊戲視窗中的 HP、MP、經驗值與等級。它透過 OCR（光學文字辨識）直接讀取畫面上的數值，不打字、不用巨集，也不存取遊戲檔案或記憶體。用它來看看每次練功消耗了多少 EXP/HP/MP、比較不同時段的效率，並取得大略的升級預估時間。
 
-## Features
+唯讀：它只會「看」你的畫面，絕不會點擊、輸入或對遊戲送出任何操作。
 
-- **Live tracking** — LV/HP/MP/EXP update about twice a second, with a
-  progress bar for each. A status pill shows Tracking/Idle, and a countdown
-  chip shows how long is left in the current session.
-- **Sessions** — stats reset on a timer (default 10 minutes, adjustable) so
-  "EXP diff" always means "since this session started." Hit **Restart
-  Session** any time to end the current one early and start fresh.
-- **History** — every finished session becomes a card: start→end time, EXP
-  gained (with %), HP/MP lost. Newest session is always at the top. Click a
-  card's title to give it a custom name (e.g. "Ellinia Forest").
-- **Settings**:
-  - **Window scale** — shrink or grow the whole window with a +/− stepper.
-  - **Always on top** — toggle whether the HUD stays above the game.
-  - **Language** — switch between 中文 and English any time, instantly.
-  - **Session interval** — how often a session auto-resets (1–60 min).
-  - **Display toggles** — show/hide HP, MP, EXP, EXP%, and level-up ETA
-    individually.
-- **Level-up ETA** — once a session has a few seconds of data, estimates
-  time-to-next-level from your current EXP rate.
+## 功能
 
-## Requirements
+- **即時追蹤** — LV/HP/MP/EXP 約每秒更新兩次，每項都有進度條。狀態標籤會顯
+  示「追蹤中」或「閒置」，倒數標籤則顯示目前紀錄區間還剩多少時間。
+- **紀錄區間（session）** — 數值會依計時器自動重置（預設 10 分鐘，可調整），
+  所以「經驗值變化」永遠代表「從這段紀錄開始到現在」的變化。隨時可以按
+  **重新開始** 提前結束目前的區間，重新計算。
+- **歷史紀錄** — 每段結束的紀錄都會變成一張卡片，顯示開始→結束時間、經驗值
+  增加量（含百分比）、HP/MP 損失。最新的紀錄永遠排在最上面。點卡片標題可以
+  自訂名稱（例如「魔法森林」）。
+- **設定**：
+  - **視窗縮放** — 用 +/− 按鈕縮放整個視窗。
+  - **永遠置頂** — 切換 HUD 是否要蓋在遊戲畫面上方。
+  - **語言** — 隨時切換中文／英文，即時生效。
+  - **紀錄區間** — 每段紀錄多久自動重置一次（1–60 分鐘）。
+  - **顯示項目** — 個別開關 HP、MP、經驗值、經驗值百分比、升級預估時間的顯示。
+- **升級預估時間** — 紀錄區間累積幾秒資料後，會依目前的經驗值成長速率估算距
+  離下一級還要多久。
 
-- **Windows** — real screen capture needs a live Windows desktop; this
-  won't run for real on macOS/Linux.
-- MapleStory installed and running.
+## 系統需求
 
-## Install
+- **Windows** — 螢幕擷取需要執行中的 Windows 桌面環境，在 macOS/Linux 上無法
+  實際運作。
+- 安裝好並執行中的楓之谷。
 
-No Python or setup needed — just the `MapleStoryAnalyer` folder containing
-`MapleStoryAnalyer.exe`. Put it wherever you like (e.g. `Desktop\MapleStoryAnalyer`)
-and keep the folder intact — the .exe needs the files alongside it.
+## 安裝
 
-## Launch tutorial
+不需要 Python，也不需要任何安裝步驟 — 只要 `MapleStoryAnalyer` 資料夾裡的
+`MapleStoryAnalyer.exe` 就夠了。整個資料夾可以放到任何地方（例如
+`Desktop\MapleStoryAnalyer`），但請保持資料夾完整，因為執行檔需要旁邊的其他
+檔案才能運作。
 
-1. Have MapleStory running and visible (doesn't need to be focused *before*
-   you launch the HUD, just focused *while* it tracks — see Troubleshooting).
-2. Double-click `MapleStoryAnalyer.exe`. Windows may show a SmartScreen
-   warning on first run since it isn't code-signed — click **More info →
-   Run anyway**.
-3. A small window titled "MapleStoryAnalyer" opens, always on top, on the
-   **Live** tab by default. If the game window is found and focused, LV/HP/MP/EXP
-   should start filling in within a second or two.
-4. Click into the game and play normally — the HUD keeps reading in the
-   background. Switch to the **History** tab any time to see past sessions,
-   or **Settings** to adjust scale, language, session length, etc.
-5. Close the window like any other app when you're done — nothing needs to be
-   shut down separately.
+## 使用教學
 
-## Run with Python instead
+1. 確認楓之谷正在執行、視窗可見（啟動 HUD *之前* 不必是焦點視窗，但追蹤期間
+   需要保持焦點，詳見「疑難排解」）。
+2. 雙擊 `MapleStoryAnalyer.exe`。由於這個執行檔沒有數位簽章，Windows 可能會
+   跳出 SmartScreen 警告，請點 **更多資訊 → 仍要執行**。
+3. 會開啟一個標題為「MapleStoryAnalyer」的小視窗，永遠置頂，預設停在 **即時**
+   分頁。只要找到遊戲視窗且它是焦點視窗，LV/HP/MP/EXP 就會在一兩秒內開始顯示
+   數值。
+4. 點回遊戲正常遊玩即可，HUD 會在背景持續讀取。隨時可以切到 **紀錄** 分頁查
+   看過去的紀錄，或到 **設定** 分頁調整縮放、語言、紀錄區間長度等等。
+5. 用完後像一般視窗一樣關掉即可，不需要額外的收尾動作。
 
-Prefer running from source instead of the .exe? You'll need:
+## 改用 Python 執行
 
-- **Python 3.10** (via the `py` launcher, e.g. `py -3.10`).
-- MapleStory installed and running (same as above).
+想直接執行原始碼、而不是用 .exe 嗎？你需要：
 
-Open a terminal in this project's folder and run once:
+- **Python 3.10**（透過 `py` 啟動器，例如 `py -3.10`）。
+- 安裝好並執行中的楓之谷（同上）。
+
+在專案資料夾開啟終端機，執行一次：
 
 ```powershell
 py -3.10 -m venv .venv
@@ -74,44 +66,34 @@ py -3.10 -m venv .venv
 .venv\Scripts\python .venv\Scripts\pywin32_postinstall.py -install
 ```
 
-This creates a `.venv` folder with everything the app needs (OCR engine, UI
-toolkit, screen-capture libraries). You only need to do this once; after
-that, launch with:
+這會建立 `.venv` 資料夾，裡面包含程式所需的一切（OCR 引擎、UI 函式庫、螢幕擷
+取函式庫）。只需要做一次，之後用這個指令啟動：
 
 ```powershell
 .venv\Scripts\python scripts\run_overlay.py
 ```
 
-Same Launch tutorial and Troubleshooting apply either way — the app behaves
-identically whether started via the .exe or this command.
+不論用 .exe 還是這個指令啟動，程式行為完全相同，上面的使用教學與下面的疑難排
+解都同樣適用。
 
-## Troubleshooting
+## 疑難排解
 
-- **All fields show `--` / blank.** The game window isn't focused. This is a
-  hard constraint, not a bug: the game itself dims its rendering when it
-  loses focus, and that starves the OCR of readable text. Click back into
-  the game window.
-- **Status pill says "Game window not found."** The HUD looks for a window
-  titled `新楓之谷` by default. If your client's window title is different,
-  this won't match it.
-- **Status pill says "Game window minimized."** Restore the game window (it
-  doesn't need to be the foreground window once tracking has started again,
-  just not minimized).
-- **A field is occasionally wrong for one tick, then corrects itself.**
-  OCR misreads happen — usually caused by a combat effect or floating damage
-  number covering a stat bar for a frame. The HUD carries forward the last
-  known good value instead of flashing blank, so a single bad tick shouldn't
-  be visible.
-- **Numbers look frozen / EXP not moving even though I'm playing.** Check the
-  status pill — if it says "Tracking," data is flowing; if HP/MP/EXP truly
-  haven't changed, that's genuinely idle (not a bug). If the pill shows an
-  error instead, see the two bullets above.
-- **Text is too small/cramped, or the window is an awkward size.** Settings
-  → Window Scale, use the +/− stepper. There's also a scrollbar in Settings
-  if some options are cut off at very small scales.
-- **Want it to stop covering the game.** Settings → turn off "Always on top,"
-  or just move/resize the window like any other.
-- **Session numbers look "off" after clicking Restart quickly twice.** By
-  design, a restart within 1 second of the previous one is ignored (avoids
-  logging a meaningless 0-duration entry) — this is expected, not a bug.
-
+- **所有欄位都顯示 `--` 或空白。** 遊戲視窗不是焦點視窗。這是硬性限制，不是
+  bug：遊戲本身在失去焦點時會降低畫面更新，導致 OCR 讀不到文字。點回遊戲視窗
+  即可。
+- **狀態標籤顯示「找不到遊戲視窗」。** HUD 預設尋找標題包含 `新楓之谷` 的視
+  窗；如果你的遊戲客戶端視窗標題不同，就會找不到。
+- **狀態標籤顯示「遊戲視窗已最小化」。** 請還原遊戲視窗（開始追蹤後不必是最
+  上層的焦點視窗，但不能是最小化狀態）。
+- **某個欄位偶爾讀錯一次，之後又自己恢復。** OCR 偶爾會誤判，通常是戰鬥特效
+  或飄血數字剛好蓋住某一幀的狀態列文字。HUD 會沿用該欄位上次讀到的正確數值，
+  而不是直接顯示空白，所以單次誤判通常不會被察覺。
+- **數字看起來卡住不動，明明在玩但經驗值沒變。** 先看狀態標籤：如果顯示「追
+  蹤中」，代表資料正常更新；如果 HP/MP/EXP 真的都沒變化，那就是真的處於閒置
+  狀態，不是 bug。如果標籤顯示錯誤訊息，請參考上面兩點。
+- **文字太小、太擠，或視窗大小很奇怪。** 到「設定」→「視窗縮放」，用 +/− 按
+  鈕調整。縮放到很小時如果選項被裁切，「設定」分頁也有捲軸可以捲動。
+- **不想讓它蓋住遊戲畫面。** 到「設定」關掉「永遠置頂」，或像一般視窗一樣移
+  動、縮放它。
+- **快速連按兩次「重新開始」後，數字看起來怪怪的。** 這是設計行為：1 秒內的
+  重複重置會被忽略（避免產生時長為 0 的無意義紀錄），不是 bug。
