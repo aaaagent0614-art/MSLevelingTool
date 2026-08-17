@@ -23,19 +23,33 @@ the full spec. This module still only calls Session's public methods and
 reads StatSnapshot/SessionSummary fields -- the capture/OCR/parser engine
 (capture.py/ocr.py/parser.py/regions.py) is untouched by this rework, per
 the hard UI/engine separation rule in that same doc.
+
+Settings + i18n (2026-08-17, later same day): all UI-layer settings live in
+one `Settings` struct (settings.py) instead of scattered instance attributes,
+so a future persistence layer can load/save it wholesale. All user-facing
+strings route through `self._t(key)` into i18n.py's translation table (English
++ Traditional Chinese, zh default) instead of literals inline here -- static
+widgets built once register themselves in `self._i18n_labels` so a language
+switch can walk the list and reconfigure every one of them, tabs get renamed
+via CTkTabview.rename(), and History cards (built dynamically per session) are
+simply torn down and rebuilt from `self._session_history` on switch.
 """
 from __future__ import annotations
 
+import dataclasses
 import sys
 import time
 import tkinter as tk
+from tkinter import simpledialog
 from typing import Protocol
 
 import customtkinter as ctk
 
+from .i18n import Lang, t
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, parse_fields
 from .rate import Session, SessionSummary
+from .settings import Settings
 
 # The console's codepage (e.g. cp950 Traditional Chinese) can't represent
 # every character OCR might misread out of the game's UI -- printing one
@@ -58,7 +72,9 @@ if sys.platform == "win32":
         pass
 
 TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
-WINDOW_MIN = 1  # default session length in minutes -- set short for testing
+SCALE_STEP_PCT = 10
+SCALE_MIN_PCT = 50
+SCALE_MAX_PCT = 150
 
 # Color tokens, matching the approved HTML design preview.
 BG = "#0d1117"
@@ -75,11 +91,23 @@ EXP_COLOR = "#ffc247"
 OK_COLOR = "#3ddc84"
 TRACK_BG = "#12291f"
 
-_FONT_UI = ("Segoe UI", 13)
-_FONT_UI_BOLD = ("Segoe UI", 13, "bold")
+# Chrome text (tabs, headers, buttons, switches, kv labels -- anything that
+# can carry translated content) picks its font family from the active
+# language via OverlayApp._font(); Segoe UI has no real Traditional Chinese
+# glyphs of its own (falls back to a system CJK font Windows picks for you,
+# inconsistent with the rest of the UI), so zh uses Microsoft JhengHei
+# (Windows' standard Traditional Chinese UI font) instead.
+_FONT_FAMILY: dict[Lang, str] = {"en": "Segoe UI", "zh": "Microsoft JhengHei"}
+
+# Fixed English-only chrome that never carries translated text (the game's
+# own on-screen abbreviations LV/HP/MP/EXP, and the +/- scale stepper) stays
+# on a plain Segoe UI tuple -- no language switching needed for pure ASCII.
 _FONT_LABEL = ("Segoe UI", 11, "bold")
-_FONT_LABEL_SM = ("Segoe UI", 10, "bold")
-_FONT_LABEL_XS = ("Segoe UI", 9, "bold")
+_FONT_UI_BOLD = ("Segoe UI", 13, "bold")
+
+# Pure-numeric value labels (HP/MP/EXP readouts, session EXP diffs, history
+# card numbers) stay on Consolas regardless of language -- they never render
+# CJK text, and Consolas' monospacing is what keeps tabular digits aligned.
 _FONT_MONO = ("Consolas", 13)
 _FONT_MONO_SM = ("Consolas", 11)
 _FONT_MONO_BOLD = ("Consolas", 13, "bold")
@@ -102,6 +130,8 @@ def _fmt_loss(loss: int) -> str:
 
 
 def _fmt_summary(s: SessionSummary, index: int) -> str:
+    # Console/debug log only, not shown in the UI -- deliberately left in
+    # plain English regardless of self._settings.language.
     diff = s.exp_diff
     diff_s = f"+{diff:,}" if diff is not None else "?"
     pct_diff = s.exp_pct_diff
@@ -126,72 +156,167 @@ class OverlayApp:
         self._ocr = StatPanelOcr()
         self._session = Session()
         self._session_history: list[SessionSummary] = []
-        # Instance attribute (not the module constant directly) so the
-        # Settings tab can rebind this without Session/rate.py needing to
-        # know settings exist -- session length is a UI-layer setting.
-        self._window_min = WINDOW_MIN
-
-        # Settings-tab state. Pure UI-layer: the engine keeps tracking every
-        # field regardless of what's shown, these only affect _render().
-        self._show_hp = True
-        self._show_mp = True
-        self._show_exp = True
-        self._show_exp_pct = True
-        self._show_eta = True
+        self._settings = Settings()
 
         self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
+        # Newest-first: History cards are inserted at index 0 rather than
+        # appended, so this tracks the card widgets in display order (index 0
+        # = topmost/newest) to pack each new one with before=.
+        self._history_cards: list[ctk.CTkFrame] = []
+        # Static widgets whose text is a plain translated string (no
+        # per-tick data baked in) register themselves here as they're built,
+        # so _apply_language() can walk this list and reconfigure every one
+        # instead of _build_*_tab needing to be re-run from scratch.
+        self._i18n_labels: list[tuple[ctk.CTkBaseClass, str]] = []
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
+        # Applied before the window/widgets are built so the default window
+        # size below is already at the configured scale, not built at 100%
+        # then rescaled after the fact.
+        ctk.set_widget_scaling(self._settings.scale_pct / 100)
+        ctk.set_window_scaling(self._settings.scale_pct / 100)
 
         self.root = ctk.CTk()
         self.root.title("MapleStoryAnalyer")
-        self.root.attributes("-topmost", True)
+        self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
-        self.root.geometry("480x640+40+40")
+        self.root.geometry("260x420+40+40")
 
         self._tabview = ctk.CTkTabview(self.root, fg_color=BG, segmented_button_fg_color=SURFACE)
         self._tabview.pack(fill="both", expand=True, padx=8, pady=8)
-        self._tabview.add("Live")
-        self._tabview.add("History")
-        self._tabview.add("Settings")
+        # CTkTabview's tab name doubles as its segmented-button label and its
+        # internal dict key -- there's no separate "id" to address a tab by,
+        # so the translated string itself is the key. rename() (used by
+        # _apply_language) swaps the key/label together and keeps the
+        # frame/selection intact; this dict just tracks the current name per
+        # logical tab so rename() always has both the old and new string.
+        self._tab_names = {
+            "live": t("tab_live", self._settings.language),
+            "history": t("tab_history", self._settings.language),
+            "settings": t("tab_settings", self._settings.language),
+        }
+        for name in self._tab_names.values():
+            self._tabview.add(name)
 
-        self._build_live_tab(self._tabview.tab("Live"))
-        self._build_history_tab(self._tabview.tab("History"))
-        self._build_settings_tab(self._tabview.tab("Settings"))
+        self._build_live_tab(self._tabview.tab(self._tab_names["live"]))
+        self._build_history_tab(self._tabview.tab(self._tab_names["history"]))
+        self._build_settings_tab(self._tabview.tab(self._tab_names["settings"]))
+        self._tabview.set(self._tab_names["live"])  # CTkTabview defaults to the last-added tab otherwise
         self._apply_visibility()
 
         self._tick()
+
+    # ---- i18n ------------------------------------------------------------
+
+    def _t(self, key: str, **kwargs: object) -> str:
+        return t(key, self._settings.language, **kwargs)
+
+    def _localize_error(self, message: str) -> str:
+        """Translate the known capture.py RuntimeError messages (game
+        minimized / game window not found) shown via _set_status_error --
+        these are routine, expected states, not exceptional ones, so they
+        deserve a real translation rather than leaking capture.py's raw
+        English text into a zh-language UI. Anything unrecognized (a real
+        bug, not a known game-window state) passes through unchanged."""
+        if message == "game window is minimized":
+            return self._t("status_error_minimized")
+        if message.startswith("No window found with title containing"):
+            return self._t("status_error_not_found")
+        return message
+
+    def _font(self, size: int, bold: bool = False) -> tuple:
+        """Chrome-text font at the given size, in the active language's font
+        family (see _FONT_FAMILY). Use for any widget that renders translated
+        text; pure-numeric value labels should use the module-level
+        _FONT_MONO* constants instead (see their docstring)."""
+        family = _FONT_FAMILY[self._settings.language]
+        return (family, size, "bold") if bold else (family, size)
+
+    def _i18n(self, widget: ctk.CTkBaseClass, key: str, size: int, bold: bool = True) -> ctk.CTkBaseClass:
+        """Set a widget's text + font from a translation key and register it
+        for re-translation on language switch. Use for any widget whose text
+        is *only* the translated string (no per-tick value baked in) --
+        widgets that mix in live data (timer, status pill, kv values) instead
+        call self._t(...)/self._font(...) directly wherever they're
+        re-rendered every tick."""
+        widget.configure(text=self._t(key), font=self._font(size, bold))
+        self._i18n_labels.append((widget, key, size, bold))
+        return widget
+
+    def _apply_language(self, lang: Lang) -> None:
+        if lang == self._settings.language:
+            return
+        self._settings.language = lang
+
+        for logical, key in (("live", "tab_live"), ("history", "tab_history"), ("settings", "tab_settings")):
+            old_name = self._tab_names[logical]
+            new_name = self._t(key)
+            if new_name != old_name:
+                self._tabview.rename(old_name, new_name)
+                self._tab_names[logical] = new_name
+
+        for widget, key, size, bold in self._i18n_labels:
+            widget.configure(text=self._t(key), font=self._font(size, bold))
+
+        self._status_pill.configure(font=self._font(9, bold=True))
+        self._timer_label.configure(font=self._font(10, bold=True))
+        self._scale_header_label.configure(
+            text=self._t("settings_window_scale") + f" — {self._settings.scale_pct}%", font=self._font(11, bold=True)
+        )
+        self._interval_header_label.configure(
+            text=self._t("settings_session_interval") + f" — {self._settings.window_min} {self._t('unit_min')}",
+            font=self._font(11, bold=True),
+        )
+
+        # History cards mix translated chrome (SESSION #N, HP/MP LOSS) with
+        # per-session data and aren't worth tracking widget-by-widget --
+        # tearing down and rebuilding from the data we already keep is
+        # simpler and this only happens on an explicit language switch, and
+        # _append_history_card already picks up the new language/font.
+        self._rebuild_history_cards()
+
+        self._render(self._last)  # refreshes status pill / timer text immediately
 
     # ---- tab construction ------------------------------------------------
 
     def _build_live_tab(self, parent) -> None:
         parent.grid_columnconfigure(0, weight=1)
 
-        # Status + session timer: their own strip, not just more stat rows --
-        # these are "what's happening right now" facts, distinct in kind
-        # (and styling) from the stat readouts below.
+        # Status + session timer share one row, both shrunk down (smaller
+        # font/padding than the rest of the chrome) so a longer localized
+        # status string (the capture-error states from _localize_error run
+        # much longer than "Tracking"/"追蹤中") still leaves room for the
+        # timer instead of pushing the Restart button out of the window.
+        # wraplength caps the status pill's own width so it wraps to a
+        # second line rather than growing sideways into the timer's column.
         strip = ctk.CTkFrame(parent, fg_color="transparent")
-        strip.grid(row=0, column=0, sticky="ew", padx=2, pady=(2, 10))
+        strip.grid(row=0, column=0, sticky="ew", padx=2, pady=(2, 3))
         strip.grid_columnconfigure(0, weight=1)
         strip.grid_columnconfigure(1, weight=0)
 
         self._status_pill = ctk.CTkLabel(
-            strip, text="Tracking", corner_radius=999, fg_color=TRACK_BG,
-            text_color=OK_COLOR, font=_FONT_LABEL_SM, padx=14, pady=6,
+            strip, text=self._t("status_tracking"), corner_radius=999, fg_color=TRACK_BG,
+            text_color=OK_COLOR, font=self._font(9, bold=True), padx=8, pady=2,
+            anchor="w", justify="left", wraplength=110,
         )
         self._status_pill.grid(row=0, column=0, sticky="w")
 
+        # Mixes translated chrome ("left"/"剩餘") with the countdown digits,
+        # so it needs the language-aware font (self._font), not the fixed
+        # digits-only _FONT_MONO_BOLD -- unlike the pure-numeric value labels.
         self._timer_label = ctk.CTkLabel(
-            strip, text="--:-- left", corner_radius=999, fg_color=SURFACE_2,
-            text_color=INK, font=_FONT_MONO_BOLD, padx=14, pady=6,
+            strip, text="--:--", corner_radius=999, fg_color=SURFACE_2,
+            text_color=INK, font=self._font(10, bold=True), padx=8, pady=2,
         )
         self._timer_label.grid(row=0, column=1, sticky="e")
 
         # Stat grid: label | mini bar | tabular value, aligned via one grid
-        # rather than independently left-justified label:value text.
+        # rather than independently left-justified label:value text. Labels
+        # (LV/HP/MP/EXP) are the game's own on-screen abbreviations -- see
+        # i18n.py's docstring for why these are not translated.
         stats = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
-        stats.grid(row=1, column=0, sticky="ew", padx=2, pady=(0, 10))
+        stats.grid(row=1, column=0, sticky="ew", padx=2, pady=(0, 3))
         stats.grid_columnconfigure(0, weight=0)
         stats.grid_columnconfigure(1, weight=1)
         stats.grid_columnconfigure(2, weight=0)
@@ -202,14 +327,14 @@ class OverlayApp:
 
         def add_stat_row(row: int, key: str, label_text: str, color: str, with_bar: bool) -> None:
             lbl = ctk.CTkLabel(stats, text=label_text, font=_FONT_LABEL, text_color=color, anchor="w")
-            lbl.grid(row=row, column=0, sticky="w", padx=(14, 8), pady=9)
+            lbl.grid(row=row, column=0, sticky="w", padx=(14, 8), pady=2)
             value = ctk.CTkLabel(stats, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
-            value.grid(row=row, column=2, sticky="e", padx=(8, 14), pady=9)
+            value.grid(row=row, column=2, sticky="e", padx=(8, 14), pady=2)
             bar = None
             if with_bar:
                 bar = ctk.CTkProgressBar(stats, height=6, progress_color=color, fg_color=SURFACE_2)
                 bar.set(0)
-                bar.grid(row=row, column=1, sticky="ew", padx=6, pady=9)
+                bar.grid(row=row, column=1, sticky="ew", padx=6, pady=2)
                 self._bars[key] = bar
             self._stat_rows[key] = (lbl, bar, value)
             self._value_labels[key] = value
@@ -221,106 +346,183 @@ class OverlayApp:
 
         # Session info: label | tabular value, same alignment discipline.
         session_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
-        session_card.grid(row=2, column=0, sticky="ew", padx=2, pady=(0, 10))
+        session_card.grid(row=2, column=0, sticky="ew", padx=2, pady=(0, 3))
         session_card.grid_columnconfigure(0, weight=1)
         session_card.grid_columnconfigure(1, weight=0)
 
         self._kv_rows: dict[str, tuple] = {}
 
-        def add_kv_row(row: int, key: str, label_text: str) -> None:
-            lbl = ctk.CTkLabel(session_card, text=label_text, font=_FONT_UI, text_color=INK_DIM, anchor="w")
-            lbl.grid(row=row, column=0, sticky="w", padx=(14, 8), pady=7)
+        def add_kv_row(row: int, key: str, i18n_key: str) -> None:
+            lbl = ctk.CTkLabel(session_card, text_color=INK_DIM, anchor="w")
+            self._i18n(lbl, i18n_key, size=13, bold=False)
+            lbl.grid(row=row, column=0, sticky="w", padx=(14, 8), pady=1)
             value = ctk.CTkLabel(session_card, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
-            value.grid(row=row, column=1, sticky="e", padx=(8, 14), pady=7)
+            value.grid(row=row, column=1, sticky="e", padx=(8, 14), pady=1)
             self._kv_rows[key] = (lbl, value)
             self._value_labels[key] = value
 
-        add_kv_row(0, "startexp", "Start EXP")
-        add_kv_row(1, "expdiff", "EXP diff")
-        add_kv_row(2, "eta", "Level-up ETA")
-        add_kv_row(3, "hploss", "HP loss")
-        add_kv_row(4, "mploss", "MP loss")
+        add_kv_row(0, "startexp", "kv_start_exp")
+        add_kv_row(1, "expdiff", "kv_exp_diff")
+        add_kv_row(2, "eta", "kv_eta")
+        add_kv_row(3, "hploss", "kv_hp_loss")
+        add_kv_row(4, "mploss", "kv_mp_loss")
 
         self._restart_button = ctk.CTkButton(
-            parent, text="Restart Session", command=self._on_restart_clicked,
+            parent, command=self._on_restart_clicked,
             fg_color=ACCENT, text_color=ACCENT_INK, hover_color="#7ff2e0",
-            font=_FONT_UI_BOLD, corner_radius=9, height=38,
+            corner_radius=9, height=32,
         )
-        self._restart_button.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 4))
+        self._i18n(self._restart_button, "restart_button", size=13, bold=True)
+        self._restart_button.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 2))
 
     def _build_history_tab(self, parent) -> None:
         self._history_frame = ctk.CTkScrollableFrame(parent, fg_color=BG, label_text="")
         self._history_frame.pack(fill="both", expand=True, padx=2, pady=2)
         self._history_empty_label = ctk.CTkLabel(
-            self._history_frame, text="No sessions yet", font=_FONT_UI, text_color=INK_FAINT,
+            self._history_frame, text_color=INK_FAINT,
         )
+        self._i18n(self._history_empty_label, "history_empty", size=13, bold=False)
         self._history_empty_label.pack(pady=24)
 
     def _build_settings_tab(self, parent) -> None:
-        card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
-        card.pack(fill="x", padx=2, pady=(2, 0))
+        # Scrollable: at some WINDOW SCALE values the settings content is
+        # taller than the window, and a plain .pack() into the tab would
+        # just clip the overflow with no way to reach it -- a scrollbar
+        # keeps every option reachable regardless of scale/window size.
+        scroll = ctk.CTkScrollableFrame(parent, fg_color=BG, label_text="")
+        scroll.pack(fill="both", expand=True)
 
-        ctk.CTkLabel(
-            card, text="SESSION INTERVAL", anchor="w", text_color=INK_DIM, font=_FONT_LABEL,
-        ).pack(fill="x", padx=14, pady=(14, 6))
+        window_card = ctk.CTkFrame(scroll, fg_color=SURFACE, corner_radius=12)
+        window_card.pack(fill="x", padx=2, pady=(2, 3))
+
+        # Value lives in the section header, not squeezed into the control
+        # row -- at narrow window widths (esp. with the scrollbar eating
+        # horizontal space) a fixed-width label at the end of a packed row
+        # was getting clipped to invisible. The header always has room.
+        self._scale_header_label = ctk.CTkLabel(
+            window_card, text=self._t("settings_window_scale") + f" — {self._settings.scale_pct}%",
+            anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
+        )
+        self._scale_header_label.pack(fill="x", padx=14, pady=(6, 1))
+        scale_row = ctk.CTkFrame(window_card, fg_color="transparent")
+        scale_row.pack(fill="x", padx=14, pady=(0, 4))
+        # A +/- stepper instead of a slider -- a small draggable handle at
+        # this widget size was fiddly to land on an exact value; discrete
+        # SCALE_STEP_PCT taps are precise and don't need fine motor control.
+        ctk.CTkButton(
+            scale_row, text="-", width=36, command=lambda: self._on_scale_step(-SCALE_STEP_PCT),
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK, font=_FONT_UI_BOLD,
+        ).pack(side="left")
+        ctk.CTkButton(
+            scale_row, text="+", width=36, command=lambda: self._on_scale_step(SCALE_STEP_PCT),
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK, font=_FONT_UI_BOLD,
+        ).pack(side="left", padx=(6, 0))
+
+        self._topmost_var = tk.BooleanVar(value=self._settings.topmost)
+        self._i18n(ctk.CTkSwitch(
+            window_card, variable=self._topmost_var, text_color=INK,
+            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
+            command=self._on_topmost_changed,
+        ), "settings_always_on_top", size=13, bold=False).pack(fill="x", padx=14, pady=(0, 6))
+
+        lang_row = ctk.CTkFrame(window_card, fg_color="transparent")
+        lang_row.pack(fill="x", padx=14, pady=(0, 6))
+        self._i18n(
+            ctk.CTkLabel(lang_row, anchor="w", text_color=INK_DIM), "settings_language", size=11, bold=True
+        ).pack(side="left")
+        self._lang_button = ctk.CTkSegmentedButton(
+            lang_row, values=["中文", "EN"], command=self._on_language_button_changed,
+            selected_color=ACCENT, selected_hover_color="#7ff2e0", text_color=INK,
+        )
+        self._lang_button.set("中文" if self._settings.language == "zh" else "EN")
+        self._lang_button.pack(side="right")
+
+        card = ctk.CTkFrame(scroll, fg_color=SURFACE, corner_radius=12)
+        card.pack(fill="x", padx=2, pady=(0, 0))
+
+        self._interval_header_label = ctk.CTkLabel(
+            card, text=self._t("settings_session_interval") + f" — {self._settings.window_min} {self._t('unit_min')}",
+            anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
+        )
+        self._interval_header_label.pack(fill="x", padx=14, pady=(6, 1))
         slider_row = ctk.CTkFrame(card, fg_color="transparent")
-        slider_row.pack(fill="x", padx=14, pady=(0, 14))
+        slider_row.pack(fill="x", padx=14, pady=(0, 3))
         slider = ctk.CTkSlider(
             slider_row, from_=1, to=60, number_of_steps=59, command=self._on_interval_changed,
             progress_color=ACCENT, button_color=ACCENT, button_hover_color="#7ff2e0",
         )
-        slider.set(self._window_min)
-        slider.pack(side="left", fill="x", expand=True, padx=(0, 12))
-        self._interval_value_label = ctk.CTkLabel(
-            slider_row, text=f"{self._window_min} min", font=_FONT_MONO, text_color=INK, width=52, anchor="e",
-        )
-        self._interval_value_label.pack(side="right")
+        slider.set(self._settings.window_min)
+        slider.pack(fill="x", expand=True)
 
-        ctk.CTkLabel(
-            card, text="DISPLAY", anchor="w", text_color=INK_DIM, font=_FONT_LABEL,
-        ).pack(fill="x", padx=14, pady=(4, 6))
+        self._i18n(
+            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_display", size=11, bold=True
+        ).pack(fill="x", padx=14, pady=(2, 1))
 
         self._switch_vars: dict[str, tk.BooleanVar] = {}
-        for key, label_text, attr in (
-            ("hp", "Show HP", "_show_hp"),
-            ("mp", "Show MP", "_show_mp"),
-            ("exp", "Show EXP", "_show_exp"),
-            ("exp_pct", "Show EXP percentage", "_show_exp_pct"),
-            ("eta", "Show level-up ETA", "_show_eta"),
+        for key, i18n_key, attr in (
+            ("hp", "settings_show_hp", "show_hp"),
+            ("mp", "settings_show_mp", "show_mp"),
+            ("exp", "settings_show_exp", "show_exp"),
+            ("exp_pct", "settings_show_exp_pct", "show_exp_pct"),
+            ("eta", "settings_show_eta", "show_eta"),
         ):
-            var = tk.BooleanVar(value=getattr(self, attr))
+            var = tk.BooleanVar(value=getattr(self._settings, attr))
             self._switch_vars[key] = var
-            ctk.CTkSwitch(
-                card, text=label_text, variable=var, font=_FONT_UI, text_color=INK,
+            self._i18n(ctk.CTkSwitch(
+                card, variable=var, text_color=INK,
                 progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
                 command=lambda k=key, a=attr, v=var: self._on_switch_changed(k, a, v),
-            ).pack(fill="x", padx=14, pady=8)
+            ), i18n_key, size=13, bold=False).pack(fill="x", padx=14, pady=1)
 
     # ---- settings callbacks ------------------------------------------------
 
+    def _on_scale_step(self, delta: int) -> None:
+        pct = max(SCALE_MIN_PCT, min(SCALE_MAX_PCT, self._settings.scale_pct + delta))
+        if pct == self._settings.scale_pct:
+            return
+        self._settings.scale_pct = pct
+        self._scale_header_label.configure(text=self._t("settings_window_scale") + f" — {pct}%")
+        # CTk's own scaling knobs: widget_scaling resizes fonts/padding/etc,
+        # window_scaling resizes the geometry set via .geometry() -- both are
+        # needed together, otherwise widgets end up mismatched against the
+        # window size. Both apply live to the already-open root window.
+        factor = pct / 100
+        ctk.set_widget_scaling(factor)
+        ctk.set_window_scaling(factor)
+
+    def _on_topmost_changed(self) -> None:
+        self._settings.topmost = self._topmost_var.get()
+        self.root.attributes("-topmost", self._settings.topmost)
+
+    def _on_language_button_changed(self, value: str) -> None:
+        self._apply_language("zh" if value == "中文" else "en")
+
     def _on_interval_changed(self, value: float) -> None:
-        self._window_min = round(value)
-        self._interval_value_label.configure(text=f"{self._window_min} min")
+        self._settings.window_min = round(value)
+        self._interval_header_label.configure(
+            text=self._t("settings_session_interval") + f" — {self._settings.window_min} {self._t('unit_min')}"
+        )
         # Doesn't retroactively affect the currently-running session's
         # already-baked-in target -- takes effect for the *next* session,
         # same as the interval_minutes recorded on SessionSummary.finalize().
 
     def _on_switch_changed(self, key: str, attr: str, var: tk.BooleanVar) -> None:
-        setattr(self, attr, var.get())
+        setattr(self._settings, attr, var.get())
         if key != "exp_pct":  # visibility-affecting; exp_pct only changes rendered text
             self._apply_visibility()
         self._render(self._last)  # immediate feedback
 
     def _apply_visibility(self) -> None:
-        visible_stats = {"level": True, "hp": self._show_hp, "mp": self._show_mp, "exp": self._show_exp}
+        s = self._settings
+        visible_stats = {"level": True, "hp": s.show_hp, "mp": s.show_mp, "exp": s.show_exp}
         for key, (lbl, bar, value) in self._stat_rows.items():
             widgets = [lbl, value] + ([bar] if bar else [])
             for w in widgets:
                 w.grid() if visible_stats[key] else w.grid_remove()
 
         visible_kv = {
-            "startexp": True, "expdiff": True, "eta": self._show_eta,
-            "hploss": self._show_hp, "mploss": self._show_mp,
+            "startexp": True, "expdiff": True, "eta": s.show_eta,
+            "hploss": s.show_hp, "mploss": s.show_mp,
         }
         for key, (lbl, value) in self._kv_rows.items():
             for w in (lbl, value):
@@ -340,7 +542,7 @@ class OverlayApp:
             next_delay = self._do_tick()
         except Exception as e:
             print(f"[{time.strftime('%H:%M:%S')}] tick error: {e!r}", flush=True)
-            self._set_status_error(str(e))
+            self._set_status_error(self._t("status_error_unknown", detail=str(e)))
         self.root.after(next_delay, self._tick)
 
     def _do_tick(self) -> int:
@@ -351,7 +553,7 @@ class OverlayApp:
             # Game window gone (closed/crashed) or minimized -- don't crash
             # the HUD, show it plainly and keep retrying at a slower pace in
             # case it reopens/is restored.
-            self._set_status_error(str(e))
+            self._set_status_error(self._localize_error(str(e)))
             return 2000
         field_text = {name: self._ocr.read_field(img) for name, img in field_images.items()}
         snap = parse_fields(field_text)
@@ -371,7 +573,7 @@ class OverlayApp:
         self._last = merged
         self._session.record(merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct)
 
-        if self._session.elapsed() >= self._window_min * 60:
+        if self._session.elapsed() >= self._settings.window_min * 60:
             self._finalize_and_restart_session()
 
         self._render(merged)
@@ -390,7 +592,7 @@ class OverlayApp:
         # so a second click 50ms later would otherwise log a valid-looking
         # but meaningless 0-duration, 0-diff entry).
         if self._session.start_exp is not None and self._session.elapsed() >= 1.0:
-            summary = self._session.finalize(self._window_min)
+            summary = self._session.finalize(self._settings.window_min)
             self._session_history.append(summary)
             print(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(summary, len(self._session_history))}", flush=True)
             self._append_history_card(summary, len(self._session_history))
@@ -400,23 +602,57 @@ class OverlayApp:
         self._finalize_and_restart_session()
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
+    def _rebuild_history_cards(self) -> None:
+        for card in self._history_cards:
+            card.destroy()
+        self._history_cards.clear()
+        # Cards are always inserted at the top (newest-first) -- rebuilding
+        # oldest-first via _append_history_card reproduces the exact same
+        # final order without needing separate "rebuild" layout logic.
+        for index, summary in enumerate(self._session_history, start=1):
+            self._append_history_card(summary, index)
+
     def _append_history_card(self, summary: SessionSummary, index: int) -> None:
         self._history_empty_label.pack_forget()
 
         card = ctk.CTkFrame(self._history_frame, fg_color=SURFACE, corner_radius=10)
-        card.pack(fill="x", pady=(0, 8))
+        # Newest-first: pack before the current top card (if any) rather than
+        # appending, so the most recently finalized session is always the
+        # first thing visible in the scrollable frame.
+        if self._history_cards:
+            card.pack(fill="x", pady=(0, 8), before=self._history_cards[0])
+        else:
+            card.pack(fill="x", pady=(0, 8))
+        self._history_cards.insert(0, card)
 
         head = ctk.CTkFrame(card, fg_color="transparent")
-        head.pack(fill="x", padx=12, pady=(10, 4))
-        ctk.CTkLabel(
-            head, text=f"SESSION #{index}", font=_FONT_LABEL_SM, text_color=INK_FAINT,
-        ).pack(side="left")
+        head.pack(fill="x", padx=12, pady=(10, 0))
+        title_label = ctk.CTkLabel(
+            head, text=summary.name or self._t("history_session", n=index), font=self._font(10, bold=True),
+            text_color=INK_FAINT, cursor="hand2",
+        )
+        title_label.pack(side="left")
+        title_label.bind("<Button-1>", lambda _e, i=index, lbl=title_label: self._on_rename_clicked(i, lbl))
         dur_min = summary.duration_s / 60
+        # Mixes translated chrome ("restarted early"/提前重啟) with the
+        # duration number when applicable, so this needs the language-aware
+        # font -- the plain "10.0m" case doesn't strictly need it, but the
+        # widget is rebuilt wholesale on language switch anyway either way.
         if summary.interval_minutes is not None and abs(dur_min - summary.interval_minutes) > 0.05:
-            dur_text, dur_color = f"{dur_min:.1f}m of {summary.interval_minutes:.0f}m, restarted early", EXP_COLOR
+            dur_text = f"{dur_min:.1f}{self._t('unit_min')[:1]} {self._t('history_restarted_early')}"
+            dur_color = EXP_COLOR
+            dur_font = self._font(11)
         else:
-            dur_text, dur_color = f"{dur_min:.1f}m", INK_DIM
-        ctk.CTkLabel(head, text=dur_text, font=_FONT_MONO_SM, text_color=dur_color).pack(side="right")
+            dur_text, dur_color, dur_font = f"{dur_min:.1f}m", INK_DIM, _FONT_MONO_SM
+        ctk.CTkLabel(head, text=dur_text, font=dur_font, text_color=dur_color).pack(side="right")
+
+        timestamp = ctk.CTkFrame(card, fg_color="transparent")
+        timestamp.pack(fill="x", padx=12, pady=(0, 4))
+        start_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(summary.start_time))
+        end_ts = time.strftime("%H:%M:%S", time.localtime(summary.end_time))
+        ctk.CTkLabel(
+            timestamp, text=f"{start_ts} → {end_ts}", font=_FONT_MONO_SM, text_color=INK_FAINT,
+        ).pack(side="left")
 
         rng = ctk.CTkFrame(card, fg_color="transparent")
         rng.pack(fill="x", padx=12, pady=(0, 8))
@@ -434,21 +670,37 @@ class OverlayApp:
 
         mini = ctk.CTkFrame(card, fg_color="transparent")
         mini.pack(fill="x", padx=12, pady=(0, 10))
-        mini.grid_columnconfigure((0, 1, 2), weight=1, uniform="mini")
+        mini.grid_columnconfigure((0, 1), weight=1, uniform="mini")
 
         def mini_stat(col: int, label: str, value: str, color: str) -> None:
             box = ctk.CTkFrame(mini, fg_color=SURFACE_2, corner_radius=7)
             box.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 4, 0))
-            ctk.CTkLabel(box, text=label, font=_FONT_LABEL_XS, text_color=INK_FAINT, anchor="w").pack(
+            ctk.CTkLabel(box, text=label, font=self._font(9, bold=True), text_color=INK_FAINT, anchor="w").pack(
                 fill="x", padx=8, pady=(6, 0)
             )
             ctk.CTkLabel(box, text=value, font=_FONT_MONO_SM, text_color=color, anchor="w").pack(
                 fill="x", padx=8, pady=(0, 6)
             )
 
-        mini_stat(0, "HP LOSS", _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
-        mini_stat(1, "MP LOSS", _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
-        mini_stat(2, "ENDED", time.strftime("%H:%M:%S", time.localtime(summary.end_time)), INK_DIM)
+        mini_stat(0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
+        mini_stat(1, self._t("history_mp_loss"), _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
+
+    def _on_rename_clicked(self, index: int, label: ctk.CTkLabel) -> None:
+        # index is 1-based and stable -- session_history is append-only, so
+        # index - 1 always still points at the same summary that was current
+        # when this card was built.
+        current = self._session_history[index - 1]
+        new_name = simpledialog.askstring(
+            self._t("rename_dialog_title"), self._t("rename_dialog_prompt"),
+            initialvalue=current.name or self._t("history_session", n=index),
+            parent=self.root,
+        )
+        if new_name is None:
+            return  # cancelled
+        new_name = new_name.strip()
+        updated = dataclasses.replace(current, name=new_name or None)
+        self._session_history[index - 1] = updated
+        label.configure(text=updated.name or self._t("history_session", n=index))
 
     def _set_status_error(self, text: str) -> None:
         self._status_pill.configure(text=text, fg_color=SURFACE_2, text_color=HP_COLOR)
@@ -472,7 +724,7 @@ class OverlayApp:
         else:
             self._value_labels["mp"].configure(text="--")
 
-        pct = f"  ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None and self._show_exp_pct else ""
+        pct = f"  ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None and self._settings.show_exp_pct else ""
         if snap.exp_cur is not None:
             self._value_labels["exp"].configure(text=f"{snap.exp_cur:,}{pct}")
             if snap.exp_pct is not None:
@@ -483,8 +735,9 @@ class OverlayApp:
         start_exp = self._session.start_exp
         self._value_labels["startexp"].configure(text=f"{start_exp:,}" if start_exp is not None else "--")
 
-        remaining = max(0.0, self._window_min * 60 - self._session.elapsed())
-        self._timer_label.configure(text=f"{int(remaining // 60)}:{int(remaining % 60):02d} left")
+        remaining = max(0.0, self._settings.window_min * 60 - self._session.elapsed())
+        remaining_s = f"{int(remaining // 60)}:{int(remaining % 60):02d}"
+        self._timer_label.configure(text=self._t("timer_left", time=remaining_s))
 
         exp_diff = self._session.exp_diff
         # Total EXP required for the current level isn't shown directly by the
@@ -497,7 +750,7 @@ class OverlayApp:
         total_exp = snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
 
         if exp_diff is not None:
-            pct_s = f"  (+{exp_diff / total_exp * 100:.2f}%)" if total_exp and self._show_exp_pct else ""
+            pct_s = f"  (+{exp_diff / total_exp * 100:.2f}%)" if total_exp and self._settings.show_exp_pct else ""
             self._value_labels["expdiff"].configure(text=f"+{exp_diff:,}{pct_s}")
         else:
             self._value_labels["expdiff"].configure(text="--")
@@ -526,9 +779,9 @@ class OverlayApp:
         # session -- any one of them moving counts as activity, not idle.
         idle = hp_loss == 0 and mp_loss == 0 and (exp_diff or 0) == 0
         if idle:
-            self._status_pill.configure(text="Idle", fg_color=SURFACE_2, text_color=INK_DIM)
+            self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
         else:
-            self._status_pill.configure(text="Tracking", fg_color=TRACK_BG, text_color=OK_COLOR)
+            self._status_pill.configure(text=self._t("status_tracking"), fg_color=TRACK_BG, text_color=OK_COLOR)
 
     def run(self) -> None:
         self.root.mainloop()

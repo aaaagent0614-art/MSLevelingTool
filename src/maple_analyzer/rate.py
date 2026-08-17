@@ -46,6 +46,9 @@ class SessionSummary:
     # it here means a saved/displayed session stays self-describing even if
     # the live setting has since changed.
     interval_minutes: float | None
+    # User-assigned label, e.g. "grinding spot A". None until renamed via the
+    # History tab -- UI-layer concern only, the engine never sets this.
+    name: str | None = None
 
     @property
     def exp_diff(self) -> int | None:

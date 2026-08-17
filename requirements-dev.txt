@@ -1,0 +1,2 @@
+# Dev-only, on top of requirements.txt. Not needed to run the app.
+pytest
