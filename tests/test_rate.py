@@ -19,6 +19,8 @@ def test_exp_diff_tracks_gain():
 
 
 def test_hp_mp_loss_only_accumulates_on_decrease():
+    # Normal-sized moves are within _LossTracker.OUTLIER_FRACTION and are
+    # taken immediately -- the noise guards add no lag to ordinary play.
     s = Session()
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
     s.record(exp_cur=1000, hp_cur=400, mp_cur=150)  # lost 100 HP, 50 MP
@@ -26,6 +28,81 @@ def test_hp_mp_loss_only_accumulates_on_decrease():
     s.record(exp_cur=1000, hp_cur=300, mp_cur=180)  # lost another 150 HP
     assert s.hp_loss == 250
     assert s.mp_loss == 50
+
+
+def test_sustained_loss_is_counted_in_full():
+    s = Session()
+    for hp in (824, 700, 600, 500, 500):
+        s.record(exp_cur=1000, hp_cur=hp, mp_cur=200, hp_max=824)
+    assert s.hp_loss == 324  # 824 -> 500, all of it
+
+
+def test_large_real_drop_lands_one_tick_late():
+    """A one-shot big enough to look like a misread is held for one tick, then
+    committed in full once the next reading corroborates it."""
+    s = Session()
+    s.record(exp_cur=1000, hp_cur=824, mp_cur=200, hp_max=824)
+    s.record(exp_cur=1000, hp_cur=90, mp_cur=200, hp_max=824)  # held
+    assert s.hp_loss == 0
+    s.record(exp_cur=1000, hp_cur=90, mp_cur=200, hp_max=824)  # corroborated
+    assert s.hp_loss == 734
+
+
+def test_alternating_misreads_book_nothing():
+    """The regime that broke a median-of-3 filter: every other tick corrupt.
+    Real MP here only regenerates, so the truth is zero loss."""
+    s = Session()
+    for mp in [1663, 3, 1663, 16, 1663, 166, 1663] * 20:
+        s.record(exp_cur=1000, hp_cur=500, mp_cur=mp, mp_max=2816)
+    assert s.mp_loss == 0
+
+
+def test_phantom_high_read_is_bounded_not_unbounded():
+    """A misread that reads *high* costs nothing that tick, then books a
+    phantom loss when the next correct read "drops" back. The expensive
+    version of this ('1663/2816' -> '16632/816') is rejected outright by the
+    max check. What remains is a high read that is still <= max and inside the
+    tolerance band -- indistinguishable from drinking a potion, so it is
+    accepted. Pinned here to record that the damage is bounded by the size of
+    the bar rather than accumulating without limit as it used to."""
+    s = Session()
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2700, mp_max=2816)  # phantom high
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
+    assert 0 < s.mp_loss <= 2816
+
+
+def test_single_tick_misread_books_no_loss():
+    """The reported bug: an idle character accumulating huge MP 'loss'.
+    '1663 -> 3 -> 1663' is a misread, not a drop."""
+    s = Session()
+    for mp in (1663, 3, 1663, 16, 1663, 166, 1663):
+        s.record(exp_cur=1000, hp_cur=500, mp_cur=mp, mp_max=2816)
+    assert s.mp_loss == 0
+
+
+def test_misparsed_max_rejects_the_whole_tick():
+    """'1663/2816' misread as '16632/816' reads high, then books a huge
+    phantom loss when the next correct read 'drops' back. The max mismatch
+    (816 != 2816) is the tell, so the tick never reaches the loss math."""
+    s = Session()
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=16632, mp_max=816)  # rejected
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
+    assert s.mp_loss == 0
+
+
+def test_real_max_change_is_accepted_once_corroborated():
+    """A level-up genuinely raises max -- the guard must not wedge shut."""
+    s = Session()
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1700, mp_max=3000)  # held
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1700, mp_max=3000)  # corroborated
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1600, mp_max=3000)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1500, mp_max=3000)
+    assert s.mp_loss == 200  # tracking normally again at the new max
 
 
 def test_missing_reading_does_not_corrupt_loss_tracking():
@@ -75,3 +152,27 @@ def test_summary_is_renamable_via_dataclasses_replace():
     assert renamed.name == "grinding spot A"
     assert summary.name is None  # original untouched
     assert renamed.start_exp == summary.start_exp  # everything else preserved
+
+
+def test_implausible_max_is_never_adopted_however_often_it_repeats():
+    """When a window covers the panel the OCR garbage is *static* -- the same
+    wrong text every tick -- so corroboration alone cannot reject it. Live
+    capture (2026-08-17): '2816' misread as '281616' installed a bogus max,
+    after which a bogus cur of 28163 passed every check and booked 25,347 of
+    phantom loss the moment the panel came back."""
+    s = Session()
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2816, mp_max=2816)
+    for _ in range(20):  # static garbage, repeated
+        s.record(exp_cur=1000, hp_cur=500, mp_cur=28163, mp_max=281616)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2816, mp_max=2816)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2816, mp_max=2816)
+    assert s.mp_loss == 0
+
+
+def test_level_up_still_raises_max_within_the_plausible_band():
+    s = Session()
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2816, mp_max=2816)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2900, mp_max=3000)  # held
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2900, mp_max=3000)  # corroborated
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2800, mp_max=3000)
+    assert s.mp_loss == 100

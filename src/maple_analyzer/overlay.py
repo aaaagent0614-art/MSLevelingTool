@@ -154,6 +154,29 @@ def _fmt_loss(loss: int) -> str:
     return f"-{loss}" if loss > 0 else "0"
 
 
+def _frame_is_coherent(snap: StatSnapshot) -> bool:
+    """Does this frame actually look like the game's stat panel?
+
+    `mss` grabs the *screen region* where the panel sits, not the game's own
+    pixels, so any window resting on top of that strip is what gets OCR'd.
+    Observed live (2026-08-17): a terminal covering the panel had the app
+    reading its own log back, e.g.
+
+        {'LV': 'r=None, hp', 'HP': 'CHPr=12/n2emn', 'MP': 'MPx=1N/2e ex'}
+
+    -- which parses as MP 1/2 and books the whole bar as loss. In every such
+    frame the LV field failed to parse while HP/MP still yielded numbers, so
+    the level is a cheap coherence signal for the panel as a whole: a frame
+    that can't produce it isn't the panel we think it is, and none of its
+    other fields should be trusted for the loss math.
+
+    Costs nothing real when it rejects a good frame: values are carried
+    forward for display anyway, and the next accepted frame measures the loss
+    across the gap from the same baseline.
+    """
+    return snap.level is not None
+
+
 def _fmt_summary(s: SessionSummary, index: int) -> str:
     # Console/debug log only, not shown in the UI -- deliberately left in
     # plain English regardless of self._settings.language.
@@ -625,7 +648,19 @@ class OverlayApp:
             for new, old in zip(vars(snap).values(), vars(self._last).values())
         ))
         self._last = merged
-        self._session.record(merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct)
+        # Coherence is judged on the *raw* snapshot, never on `merged`: merged
+        # carries a stale level forward, so it would look valid even on a
+        # frame where nothing was actually read from the panel.
+        #
+        # hp_max/mp_max are passed purely so Session can sanity-check them --
+        # a tick whose max doesn't match the rest of the session was misparsed
+        # (see rate.py's _LossTracker) and is dropped before it can inflate
+        # the loss totals.
+        if _frame_is_coherent(snap):
+            self._session.record(
+                merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct,
+                hp_max=merged.hp_max, mp_max=merged.mp_max,
+            )
 
         # Skipped while a rename dialog is open: simpledialog.askstring blocks
         # via a nested Tk event loop but doesn't stop self.root.after() timers

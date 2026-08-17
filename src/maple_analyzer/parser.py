@@ -28,11 +28,13 @@ _PAIR_RE = {
 _EXP_CUR_RE = re.compile(r"EXP\D{0,3}(\d+)", re.IGNORECASE)
 # Percentage is 0-99.99. Separator between the two digit groups is normally
 # '.', but OCR sometimes drops it entirely (bare 3-4 digit run) or -- seen
-# with recognition-only OCR on this tiny font -- reads it as a space instead
-# ('63 14%'). All three forms captured here; _normalize_pct interprets them.
-# A bare 1-2 digit run is deliberately NOT matched, ambiguous with stray
-# adjacent OCR noise.
-_EXP_PCT_RE = re.compile(r"(\d{1,2}[.\s]\d{1,2}|\d{3,4})\s*%")
+# with recognition-only OCR on this tiny font -- reads it as a space or a
+# colon instead ('63 14%', '75:11%'). The colon form showed up in 37 of 235
+# ticks in a live capture (2026-08-17), each one silently costing exp_pct and
+# with it the EXP% display and the level-up ETA. All forms captured here;
+# _normalize_pct interprets them. A bare 1-2 digit run is deliberately NOT
+# matched, ambiguous with stray adjacent OCR noise.
+_EXP_PCT_RE = re.compile(r"(\d{1,2}[.\s:]\d{1,2}|\d{3,4})\s*%")
 _LV_RE = re.compile(r"LV\.?\D{0,3}(\d+)", re.IGNORECASE)
 
 
@@ -49,9 +51,9 @@ class StatSnapshot:
 
 def _normalize_pct(raw: str) -> float:
     # Recognition-only OCR on the tiny EXP field font sometimes reads the
-    # decimal point as a space ('63 14%' instead of '63.14%') rather than
-    # dropping it outright -- treat a space the same as a dot.
-    raw = raw.replace(" ", ".")
+    # decimal point as a space ('63 14%') or a colon ('75:11%') rather than
+    # dropping it outright -- treat both the same as a dot.
+    raw = raw.replace(" ", ".").replace(":", ".")
     if "." in raw:
         return float(raw)
     if len(raw) > 2:
