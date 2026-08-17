@@ -68,32 +68,3 @@ def test_exp_pct_separator_read_as_colon():
     snap = parse_fields({"EXP": "EXP 321675[75:11%] "})
     assert snap.exp_cur == 321675
     assert snap.exp_pct == 75.11
-
-
-def test_overlay_rejects_frames_that_are_not_the_stat_panel():
-    """Raw OCR captured live (2026-08-17) while a terminal window covered the
-    game's stat bar -- the app was reading its own log back off the screen.
-    Every one of these frames must be rejected before it reaches the loss
-    math; the clean frame alongside them must still be accepted."""
-    from maple_analyzer.overlay import _frame_is_coherent
-
-    covered = [
-        {"LV": "r=None, hp", "HP": "CHPr=12/n2emn", "MP": "MPx=1N/2e ex", "EXP": "EXP32447N0576eXD"},
-        {"LV": "LV.44", "HP": "##############", "MP": "M (28163 281616 2", "EXP": "PA 324957 7598312"},
-        {"LV": "LV. 44", "HP": "h1822824（iap", "MP": "MP (28163 281616 2)", "EXP": "DXF 324957759831216"},
-    ]
-    clean = {"LV": "LV. 44", "HP": "HP[338/824] ", "MP": "MP[2684/2816] ", "EXP": "EXP 321813[75:14%] "}
-
-    assert _frame_is_coherent(parse_fields(clean))
-
-    # Frame 0 is the dangerous one: it parses as MP 1/2, i.e. the whole bar
-    # booked as loss. The level gate rejects it outright.
-    assert not _frame_is_coherent(parse_fields(covered[0]))
-    assert parse_fields(covered[0]).mp_cur == 1  # what it would have booked
-
-    # The other two keep a readable LV, so the level gate passes them -- they
-    # are stopped further down instead: one yields no HP/MP at all, the other
-    # a max of 281616 that rate.py's max-stability guard rejects. Pinned so
-    # the division of labour between the two layers stays visible.
-    assert parse_fields(covered[1]).mp_cur is None
-    assert parse_fields(covered[2]).mp_max == 281616

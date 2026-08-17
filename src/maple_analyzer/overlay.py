@@ -47,6 +47,7 @@ from typing import Protocol
 
 import customtkinter as ctk
 
+from .capture import PANEL_OBSCURED
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, parse_fields
@@ -154,29 +155,6 @@ def _fmt_loss(loss: int) -> str:
     return f"-{loss}" if loss > 0 else "0"
 
 
-def _frame_is_coherent(snap: StatSnapshot) -> bool:
-    """Does this frame actually look like the game's stat panel?
-
-    `mss` grabs the *screen region* where the panel sits, not the game's own
-    pixels, so any window resting on top of that strip is what gets OCR'd.
-    Observed live (2026-08-17): a terminal covering the panel had the app
-    reading its own log back, e.g.
-
-        {'LV': 'r=None, hp', 'HP': 'CHPr=12/n2emn', 'MP': 'MPx=1N/2e ex'}
-
-    -- which parses as MP 1/2 and books the whole bar as loss. In every such
-    frame the LV field failed to parse while HP/MP still yielded numbers, so
-    the level is a cheap coherence signal for the panel as a whole: a frame
-    that can't produce it isn't the panel we think it is, and none of its
-    other fields should be trusted for the loss math.
-
-    Costs nothing real when it rejects a good frame: values are carried
-    forward for display anyway, and the next accepted frame measures the loss
-    across the gap from the same baseline.
-    """
-    return snap.level is not None
-
-
 def _fmt_summary(s: SessionSummary, index: int) -> str:
     # Console/debug log only, not shown in the UI -- deliberately left in
     # plain English regardless of self._settings.language.
@@ -219,6 +197,10 @@ class OverlayApp:
         # Guards _do_tick's finalize-on-timeout check against the rename
         # dialog's nested event loop -- see _do_tick and _on_rename_clicked.
         self._modal_open = False
+        # Last capture failure message, so _do_tick can log state changes
+        # instead of repeating the same line every 2s retry.
+        self._last_capture_error: str | None = None
+        self._last_client_size: tuple[int, int] | None = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -265,7 +247,7 @@ class OverlayApp:
 
     def _localize_error(self, message: str) -> str:
         """Translate the known capture.py RuntimeError messages (game
-        minimized / game window not found) shown via _set_status_error --
+        minimized / not found / stat panel covered) shown via _set_status_error --
         these are routine, expected states, not exceptional ones, so they
         deserve a real translation rather than leaking capture.py's raw
         English text into a zh-language UI. Anything unrecognized (a real
@@ -274,6 +256,8 @@ class OverlayApp:
             return self._t("status_error_minimized")
         if message.startswith("No window found with title containing"):
             return self._t("status_error_not_found")
+        if message == PANEL_OBSCURED:
+            return self._t("status_error_obscured")
         return message
 
     def _font(self, size: int, bold: bool = False) -> tuple:
@@ -627,11 +611,31 @@ class OverlayApp:
         try:
             field_images = self._source.grab_fields()
         except RuntimeError as e:
-            # Game window gone (closed/crashed) or minimized -- don't crash
-            # the HUD, show it plainly and keep retrying at a slower pace in
-            # case it reopens/is restored.
+            # Game window gone (closed/crashed), minimized, or the stat panel
+            # is covered by another window -- don't crash the HUD, show it
+            # plainly and keep retrying at a slower pace in case it clears.
+            #
+            # Logged on *transition* only: this path produces no other output,
+            # so a persistently obscured panel used to leave a completely
+            # empty log with nothing to diagnose from -- but logging every
+            # 2s retry would bury the real ticks.
+            if str(e) != self._last_capture_error:
+                self._log(f"[{time.strftime('%H:%M:%S')}] capture unavailable: {e}")
+                self._last_capture_error = str(e)
             self._set_status_error(self._localize_error(str(e)))
             return 2000
+        if self._last_capture_error is not None:
+            self._log(f"[{time.strftime('%H:%M:%S')}] capture recovered")
+            self._last_capture_error = None
+
+        # Every crop is scaled from the client size (regions.py), so a log
+        # without it can't explain a bad read -- and a mid-session resize is
+        # exactly the kind of thing that moves the panel out from under the
+        # boxes. Logged once at startup and again on any change.
+        client_size = getattr(self._source, "client_size", None)
+        if client_size is not None and client_size != self._last_client_size:
+            self._log(f"[{time.strftime('%H:%M:%S')}] client size: {client_size[0]}x{client_size[1]}")
+            self._last_client_size = client_size
         field_text = {name: self._ocr.read_field(img) for name, img in field_images.items()}
         snap = parse_fields(field_text)
         self._log(f"[{time.strftime('%H:%M:%S')}] fields={field_text}")
@@ -648,19 +652,23 @@ class OverlayApp:
             for new, old in zip(vars(snap).values(), vars(self._last).values())
         ))
         self._last = merged
-        # Coherence is judged on the *raw* snapshot, never on `merged`: merged
-        # carries a stale level forward, so it would look valid even on a
-        # frame where nothing was actually read from the panel.
-        #
         # hp_max/mp_max are passed purely so Session can sanity-check them --
         # a tick whose max doesn't match the rest of the session was misparsed
-        # (see rate.py's _LossTracker) and is dropped before it can inflate
-        # the loss totals.
-        if _frame_is_coherent(snap):
-            self._session.record(
-                merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct,
-                hp_max=merged.hp_max, mp_max=merged.mp_max,
-            )
+        # (see rate.py's _LossTracker) and is dropped before it can inflate the
+        # loss totals.
+        #
+        # There used to be a "does this frame even look like the stat panel?"
+        # gate here (reject the tick unless LV parsed). It was removed after
+        # ablating it against both live captures: it changed the totals by
+        # exactly zero, because rate.py already rejects those same frames one
+        # layer down -- and it carried a real risk of its own, since a broken
+        # LV crop would have stopped a session recording anything at all.
+        # tests/test_captured_regression.py replays the real failure through
+        # this path with no gate in front of it.
+        self._session.record(
+            merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct,
+            hp_max=merged.hp_max, mp_max=merged.mp_max,
+        )
 
         # Skipped while a rename dialog is open: simpledialog.askstring blocks
         # via a nested Tk event loop but doesn't stop self.root.after() timers

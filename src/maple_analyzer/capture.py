@@ -26,6 +26,42 @@ from PIL import Image
 from .regions import FIELD_BOXES, STAT_PANEL_BOX, scale_box
 
 
+# Raised (as a RuntimeError message) when another window sits over the stat
+# panel. Routine and recoverable, so it travels the same path as the
+# minimized/not-found states -- see overlay._do_tick and _localize_error.
+PANEL_OBSCURED = "stat panel is obscured"
+
+
+def field_sample_points(client_size: tuple[int, int]) -> list[tuple[int, int]]:
+    """Client-relative points to probe for occlusion: the four corners of each
+    FIELD_BOX, inset by a pixel so a corner lands inside its own box.
+
+    Sampling per *field* rather than the panel as a whole is deliberate. A
+    window clipping only the MP digits is the dangerous case -- the 'MP' label
+    stays readable so the value still parses, just wrong -- and a panel-level
+    check with a few points can miss it.
+    """
+    points: list[tuple[int, int]] = []
+    for box in FIELD_BOXES.values():
+        b = scale_box(box, client_size)
+        points += [
+            (b.left + 1, b.top + 1), (b.right - 2, b.top + 1),
+            (b.left + 1, b.bottom - 2), (b.right - 2, b.bottom - 2),
+        ]
+    return points
+
+
+def panel_is_obscured(sample_points, game_hwnd: int, window_at) -> bool:
+    """True if any sample point belongs to a window other than the game.
+
+    `window_at(x, y)` returns the *root* window at a screen point; injected so
+    this stays testable without a Win32 desktop. Any single covered point
+    counts -- there is no threshold, because partial coverage corrupts values
+    rather than merely hiding them.
+    """
+    return any(window_at(x, y) != game_hwnd for x, y in sample_points)
+
+
 class WindowCapture(Protocol):
     def grab_full(self) -> Image.Image:
         """Full client-area frame."""
@@ -81,6 +117,11 @@ class GameWindowCapture:
         self._title_substring = title_substring
         self._process_name = process_name.lower()
         self._hwnd: int | None = None
+        # Last client size seen by grab_fields, for the overlay to log. Every
+        # crop in regions.py is scaled from this, so it is the single most
+        # useful number when diagnosing a bad read from a log after the fact
+        # -- and the one thing missing from every capture taken so far.
+        self.client_size: tuple[int, int] | None = None
 
     def _owning_process_name(self, hwnd: int) -> str:
         # Title alone isn't a reliable match: e.g. a browser tab for a wiki page
@@ -160,6 +201,11 @@ class GameWindowCapture:
         })
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
+    def _root_window_at(self, x: int, y: int) -> int:
+        # GA_ROOT (2) resolves a child window/control to its top-level owner,
+        # so the game's own children don't read as something covering it.
+        return self._win32gui.GetAncestor(self._win32gui.WindowFromPoint((x, y)), 2)
+
     def grab_fields(self) -> dict[str, Image.Image]:
         # One screen grab covering the whole panel (mss itself is cheap, ~3.5ms
         # measured -- see VERSIONS.md/overlay.py timing notes), then slice each
@@ -167,6 +213,16 @@ class GameWindowCapture:
         # mss.grab() calls.
         left, top, right, bottom = self._client_rect_on_screen()
         client_size = (right - left, bottom - top)
+        self.client_size = client_size
+
+        # mss grabs the screen *region* where the panel sits, not the game's
+        # own pixels, so anything on top of it is what would reach OCR. Refuse
+        # the frame instead of reading someone else's window (~0.03ms measured
+        # for the whole check, against ~60ms of OCR).
+        points = [(left + x, top + y) for x, y in field_sample_points(client_size)]
+        if panel_is_obscured(points, self._hwnd, self._root_window_at):
+            raise RuntimeError(PANEL_OBSCURED)
+
         panel_box = scale_box(STAT_PANEL_BOX, client_size)
         shot = self._mss.grab({
             "left": left + panel_box.left,

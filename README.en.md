@@ -104,6 +104,11 @@ identically whether started via the .exe or this command.
 - **Status pill says "Game window not found."** The HUD looks for a window
   titled `新楓之谷` by default. If your client's window title is different,
   this won't match it.
+- **Status pill says "Stat panel is covered."** Another window is sitting over
+  the game's bottom-left LV/HP/MP/EXP strip. The app reads that area off the
+  screen, so whatever is on top would be read instead of your stats — it stops
+  and waits rather than recording nonsense. Move the window (or the HUD) off
+  that strip and tracking resumes within a couple of seconds.
 - **Status pill says "Game window minimized."** Restore the game window (it
   doesn't need to be the foreground window once tracking has started again,
   just not minimized).
