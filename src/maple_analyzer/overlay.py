@@ -667,7 +667,7 @@ class OverlayApp:
         # this path with no gate in front of it.
         self._session.record(
             merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct,
-            hp_max=merged.hp_max, mp_max=merged.mp_max,
+            hp_max=merged.hp_max, mp_max=merged.mp_max, level=merged.level,
         )
 
         # Skipped while a rename dialog is open: simpledialog.askstring blocks

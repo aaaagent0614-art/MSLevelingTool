@@ -25,7 +25,13 @@ _PAIR_RE = {
     "HP": re.compile(r"HP\D{0,3}(\d+)\D+(\d+)", re.IGNORECASE),
     "MP": re.compile(r"MP\D{0,3}(\d+)\D+(\d+)", re.IGNORECASE),
 }
-_EXP_CUR_RE = re.compile(r"EXP\D{0,3}(\d+)", re.IGNORECASE)
+# The game renders EXP as `cur[pct%]`, so the opening bracket is structure,
+# not decoration: a read without one is broken and must not yield a number.
+# Measured over 12,384 live reads, requiring it costs 0.4% -- and those are
+# garbage like 'EXP101332182' (booked +101,322,049 of phantom gain before this)
+# and 'EXP357041183.37%]', where the missing bracket merged 357041 and 183 into
+# one number. OCR reads '[' as '(' or '{' often enough to accept those too.
+_EXP_CUR_RE = re.compile(r"EXP\D{0,3}(\d+)\s*[\[({]", re.IGNORECASE)
 # Percentage is 0-99.99. Separator between the two digit groups is normally
 # '.', but OCR sometimes drops it entirely (bare 3-4 digit run) or -- seen
 # with recognition-only OCR on this tiny font -- reads it as a space or a

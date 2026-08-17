@@ -46,12 +46,19 @@ class SessionSummary:
     # it here means a saved/displayed session stays self-describing even if
     # the live setting has since changed.
     interval_minutes: float | None
+    # EXP actually gained over the session, accumulated tick by tick so it
+    # stays correct across level-ups -- end_exp - start_exp is wrong the moment
+    # a session spans one, since the game's counter resets to ~0. None only for
+    # summaries built before this existed, which fall back to the subtraction.
+    exp_gained: int | None = None
     # User-assigned label, e.g. "grinding spot A". None until renamed via the
     # History tab -- UI-layer concern only, the engine never sets this.
     name: str | None = None
 
     @property
     def exp_diff(self) -> int | None:
+        if self.exp_gained is not None:
+            return self.exp_gained
         if self.start_exp is None or self.end_exp is None:
             return None
         return self.end_exp - self.start_exp
@@ -198,6 +205,13 @@ class Session:
         self._hp_cur: int | None = None
         self._mp_cur: int | None = None
         self._total_exp: float | None = None
+        # EXP is measured per *level segment* -- see _record_exp for why it is
+        # deliberately not a tick-by-tick accumulator.
+        self._banked = 0                      # gain from levels completed this session
+        self._segment_start: int | None = None  # EXP at the start of the current level
+        self._last_exp: int | None = None
+        self._last_level: int | None = None
+        self._last_implied_total: float | None = None  # see _exp_reading_is_trusted
 
     def start(self, now: float | None = None) -> None:
         """Begin a new session. Carries forward whatever EXP/HP/MP values are
@@ -208,14 +222,18 @@ class Session:
         self._hp.reset(self._hp_cur)
         self._mp.reset(self._mp_cur)
         self._total_exp = None  # re-derived fresh -- could differ after a level-up
+        self._banked = 0
+        self._segment_start = self._exp_cur
+        self._last_exp = self._exp_cur
 
     def record(
         self, exp_cur: int | None, hp_cur: int | None, mp_cur: int | None, exp_pct: float | None = None,
-        hp_max: int | None = None, mp_max: int | None = None,
+        hp_max: int | None = None, mp_max: int | None = None, level: int | None = None,
     ) -> None:
-        """hp_max/mp_max are optional but strongly recommended: passing them
-        enables _LossTracker's max-stability guard, which is what catches the
-        high-magnitude OCR misreads (see that class's docstring)."""
+        """hp_max/mp_max/level are optional but strongly recommended: the maxes
+        enable _LossTracker's max-stability guard (which catches the
+        high-magnitude OCR misreads), and the level is what tells a level-up
+        apart from a misread when EXP drops -- see _record_exp."""
         if self._start_time is None:
             self.start()
         if self._start_exp is None and exp_cur is not None:
@@ -226,8 +244,109 @@ class Session:
             self._hp_cur = hp_cur
         if mp_cur is not None:
             self._mp_cur = mp_cur
-        if exp_cur is not None:
-            self._exp_cur = exp_cur
+        self._record_exp(exp_cur, exp_pct, level)
+
+    # A reading may deviate this far from the level total established by the
+    # previous tick before it is treated as garbage. Deliberately loose: it is
+    # meant to catch order-of-magnitude nonsense, not to police OCR jitter.
+    EXP_TOTAL_BAND = 0.25
+
+    def _exp_reading_is_trusted(self, exp_cur: int, exp_pct: float | None, level: int | None) -> bool:
+        """Cross-check `cur` against `pct`.
+
+        They are two independent OCR readings of the same quantity, so their
+        ratio -- the level's total EXP, constant within a level -- validates
+        them against each other. 'EXP S255[1 12%]' (a 5 read as an S) implies a
+        total of 22,768 where every good reading agrees on ~468,500.
+
+        Compared against the *previous accepted tick*, never against a total
+        learned from the data: in the live capture the bad value was the
+        majority (379 of 429 ticks), so anything that learned would have
+        learned 22,768 and rejected every correct reading afterwards.
+
+        This mainly protects finalize(). Segments (see _record_exp) already
+        make a bad frame transient, but a summary freezes one instant, and a
+        garbage frame captured there is written to History permanently.
+        """
+        if level is not None and level != self._last_level:
+            self._last_implied_total = None  # new level, new total: re-baseline
+        if exp_pct:
+            implied = exp_cur / (exp_pct / 100)
+            if self._last_implied_total:
+                # pct is rounded to 2dp, so at small pct the implied total is
+                # numerically unstable -- half a least-significant digit is
+                # 0.005/pct in relative terms, i.e. +-50% at pct=0.01. A fixed
+                # band would reject every legitimate reading after a level-up.
+                band = self.EXP_TOTAL_BAND + (0.005 / exp_pct)
+                if abs(implied / self._last_implied_total - 1) > band:
+                    return False
+            self._last_implied_total = implied
+            return True
+        # No percentage to check against: fall back to the one bound that needs
+        # no cross-reference -- a single 500ms tick cannot gain a whole level.
+        if self._total_exp and self._last_exp is not None:
+            if abs(exp_cur - self._last_exp) > self._total_exp:
+                return False
+        return True
+
+    def _record_exp(self, exp_cur: int | None, exp_pct: float | None, level: int | None) -> None:
+        """Track EXP gained, per level *segment*.
+
+        Within a level this is plain end-minus-start, which is the important
+        property: it depends only on the current reading, so a garbage frame
+        shows a wrong number for one tick and then self-corrects. Only a
+        level-up banks a segment and opens a new one.
+
+        It is deliberately NOT a tick-by-tick accumulator. That was tried
+        (2026-08-19) to handle level-ups and it regressed badly: summing every
+        rise means one absurd reading is baked in forever, exactly the ratchet
+        that makes HP/MP loss fragile. A single garbage frame -- 'EXP101332182',
+        no brackets, no percentage -- booked +101,322,049 of phantom gain in
+        one tick and it never came back. end-minus-start showed +16,058 over
+        the same run.
+
+        HP/MP cannot be done this way and must accumulate: loss is a path
+        integral, not a difference. A character who takes 5,000 damage and
+        potions back to full has the same endpoints as one who stood still.
+        That is why the guards in _LossTracker exist there and are not needed
+        here.
+        """
+        if exp_cur is None:
+            return
+        if not self._exp_reading_is_trusted(exp_cur, exp_pct, level):
+            return  # garbage -- treat it as an unreadable field and carry forward
+        # Captured before the update below: _total_exp is re-derived every tick
+        # from cur/pct, so by the time we see the reset it already describes
+        # the *new* level. The level just finished has to be measured with the
+        # pre-update value, or every level-up under-counts by a level.
+        previous_total = self._total_exp
+
+        if self._segment_start is None:
+            self._segment_start = exp_cur
+
+        levelled = (
+            level is not None
+            and self._last_level is not None
+            and level > self._last_level
+            and self._last_exp is not None
+            and exp_cur < self._last_exp
+        )
+        if levelled:
+            # Bank the level just finished, then start the new segment at 0 --
+            # whatever is already banked into the new level counts as gain.
+            # Requiring *both* a level increase and an EXP reset keeps a
+            # one-off level misread from banking a phantom segment.
+            if previous_total:
+                self._banked += max(0, int(previous_total - self._segment_start))
+            # Without a percentage reading the finished level's total is
+            # unknown, so its remainder is dropped rather than invented: an
+            # under-count, never a fabricated number.
+            self._segment_start = 0
+
+        self._last_exp = exp_cur
+        self._exp_cur = exp_cur
+        if level is not None:
+            self._last_level = level
         if exp_cur and exp_pct:
             self._total_exp = exp_cur / (exp_pct / 100)
 
@@ -242,9 +361,13 @@ class Session:
 
     @property
     def exp_diff(self) -> int | None:
-        if self._start_exp is None or self._exp_cur is None:
+        """EXP gained since the session started, spanning level-ups (see
+        _record_exp). Clamped at 0: within a level EXP only rises, so a
+        negative here means a misread, and showing 0 for a tick beats
+        rendering a negative behind the '+' the HUD prints."""
+        if self._start_exp is None or self._exp_cur is None or self._segment_start is None:
             return None
-        return self._exp_cur - self._start_exp
+        return max(0, self._banked + (self._exp_cur - self._segment_start))
 
     @property
     def hp_loss(self) -> int:
@@ -269,4 +392,5 @@ class Session:
             mp_loss=self._mp.loss,
             total_exp=self._total_exp,
             interval_minutes=interval_minutes,
+            exp_gained=self.exp_diff,
         )

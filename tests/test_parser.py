@@ -21,10 +21,26 @@ def test_missing_dot_in_pct_normalized():
     assert snap.exp_pct == 38.05
 
 
-def test_missing_dot_and_bracket():
+def test_missing_bracket_is_now_unreadable():
+    """This used to parse: the bracket was treated as decoration, so a read
+    that lost it still yielded a number. That tolerance is what let
+    'EXP357041183.37%]' merge 357041 and 183 into 357,041,183, and
+    'EXP101332182' book +101,322,049 of phantom gain.
+
+    Requiring the bracket costs 0.4% of reads (51 of 12,384 measured live) and
+    nearly all of those are garbage.
+
+    The percentage goes with it: _find_exp only looks for pct after a
+    successful cur match, so a broken structure discards both. That coupling
+    is deliberate -- if the field doesn't look like `cur[pct%]`, neither
+    number in it is trustworthy."""
     snap = parse_fields({"EXP": "EXP162950 3805%"})
-    assert snap.exp_cur == 162950
-    assert snap.exp_pct == 38.05
+    assert snap.exp_cur is None
+    assert snap.exp_pct is None
+
+    # the same reading with its bracket intact still works
+    ok = parse_fields({"EXP": "EXP162950[3805%]"})
+    assert (ok.exp_cur, ok.exp_pct) == (162950, 38.05)
 
 
 def test_space_for_dot_in_pct():
