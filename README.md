@@ -1,10 +1,11 @@
 # MapleStoryAnalyer
 
 A small always-on-top HUD that watches your MapleStory game window and tracks
-your HP, MP, EXP, and Level in real time — no typing, no macros, just reads
-what's already on your screen. Use it to see how much EXP/HP/MP you're
-burning per grinding session, compare sessions, and get a rough ETA to your
-next level.
+your HP, MP, EXP, and Level in real time. It uses OCR (optical character
+recognition) to read the stat numbers straight off your screen — no typing,
+no macros, no game files or memory access. Use it to see how much EXP/HP/MP
+you're burning per grinding session, compare sessions, and get a rough ETA
+to your next level.
 
 Read-only: it only looks at your screen, it never clicks, types, or sends
 anything to the game.
