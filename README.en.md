@@ -27,8 +27,9 @@ anything to the game.
   "EXP diff" always means "since this session started." Hit **Restart
   Session** any time to end the current one early and start fresh.
 - **History** — every finished session becomes a card: start→end time, EXP
-  gained (with %), HP/MP lost. Newest session is always at the top. Click a
-  card's title to give it a custom name (e.g. "Ellinia Forest").
+  gained (with %), HP/MP lost (approximate — see Troubleshooting). Newest
+  session is always at the top. Click a card's title to give it a custom name
+  (e.g. "Ellinia Forest").
 - **Settings**:
   - **Window scale** — shrink or grow the whole window with a +/− stepper.
   - **Always on top** — toggle whether the HUD stays above the game.
@@ -44,6 +45,7 @@ anything to the game.
 - **Windows** — real screen capture needs a live Windows desktop; this
   won't run for real on macOS/Linux.
 - MapleStory installed and running.
+- **Game resolution: 1366×768** — currently the only supported resolution.
 
 ## Install
 
@@ -110,6 +112,16 @@ identically whether started via the .exe or this command.
   number covering a stat bar for a frame. The HUD carries forward the last
   known good value instead of flashing blank, so a single bad tick shouldn't
   be visible.
+- **HP/MP loss looks too high, too low, or plain wrong.** Treat HP/MP loss as
+  a rough figure, not an exact count. Two reasons. *Sampling:* the HUD reads
+  the bars twice a second and adds up the drops between consecutive reads, so
+  damage you heal back inside one 500 ms gap is never seen at all, and several
+  hits landing in the same gap count as one. *OCR:* HP/MP loss is a running
+  total, so a single misread digit (824 read as 24) adds a large phantom loss
+  that stays in the session total for good. EXP doesn't have this problem —
+  it's just end minus start, so a bad reading in the middle corrects itself on
+  the next tick. If a session's HP/MP looks absurd, hit **Restart Session** to
+  start the count over.
 - **Numbers look frozen / EXP not moving even though I'm playing.** Check the
   status pill — if it says "Tracking," data is flowing; if HP/MP/EXP truly
   haven't changed, that's genuinely idle (not a bug). If the pill shows an
