@@ -189,7 +189,7 @@ class OverlayApp:
         ctk.set_window_scaling(self._settings.scale_pct / 100)
 
         self.root = ctk.CTk()
-        self.root.title("MapleStoryAnalyer")
+        self.root.title("MapleStoryAnalyzer")
         self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
         self.root.geometry("260x420+40+40")

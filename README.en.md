@@ -1,4 +1,4 @@
-# MapleStoryAnalyer
+# MapleStoryAnalyzer
 
 *[繁體中文版 README](README.md)*
 
@@ -12,7 +12,7 @@ to your next level.
 Read-only: it only looks at your screen, it never clicks, types, or sends
 anything to the game.
 
-![MapleStoryAnalyer running alongside the game](docs/screenshot.jpg)
+![MapleStoryAnalyzer running alongside the game](docs/screenshot.jpg)
 
 *(HUD shown in Chinese — switch to English any time in Settings.)*
 
@@ -47,18 +47,18 @@ anything to the game.
 
 ## Install
 
-No Python or setup needed — just the `MapleStoryAnalyer` folder containing
-`MapleStoryAnalyer.exe`. Put it wherever you like (e.g. `Desktop\MapleStoryAnalyer`)
+No Python or setup needed — just the `MapleStoryAnalyzer` folder containing
+`MapleStoryAnalyzer.exe`. Put it wherever you like (e.g. `Desktop\MapleStoryAnalyzer`)
 and keep the folder intact — the .exe needs the files alongside it.
 
 ## Launch tutorial
 
 1. Have MapleStory running and visible (doesn't need to be focused *before*
    you launch the HUD, just focused *while* it tracks — see Troubleshooting).
-2. Double-click `MapleStoryAnalyer.exe`. Windows may show a SmartScreen
+2. Double-click `MapleStoryAnalyzer.exe`. Windows may show a SmartScreen
    warning on first run since it isn't code-signed — click **More info →
    Run anyway**.
-3. A small window titled "MapleStoryAnalyer" opens, always on top, on the
+3. A small window titled "MapleStoryAnalyzer" opens, always on top, on the
    **Live** tab by default. If the game window is found and focused, LV/HP/MP/EXP
    should start filling in within a second or two.
 4. Click into the game and play normally — the HUD keeps reading in the

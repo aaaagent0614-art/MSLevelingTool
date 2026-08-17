@@ -1,4 +1,4 @@
-# MapleStoryAnalyer
+# MapleStoryAnalyzer
 
 *[English README](README.en.md)*
 
@@ -6,7 +6,7 @@
 
 只會「看」你的畫面，絕不會點擊、輸入或對遊戲送出任何操作。
 
-![MapleStoryAnalyer 實際執行畫面](docs/screenshot.jpg)
+![MapleStoryAnalyzer 實際執行畫面](docs/screenshot.jpg)
 
 ▶️ **[示範影片](https://youtu.be/Joqzcg6g798)** — 實際執行時的操作與畫面。
 
@@ -37,18 +37,18 @@
 
 ## 安裝
 
-不需要 Python，也不需要任何安裝步驟 — 只要 `MapleStoryAnalyer` 資料夾裡的
-`MapleStoryAnalyer.exe` 就夠了。整個資料夾可以放到任何地方（例如
-`Desktop\MapleStoryAnalyer`），但請保持資料夾完整，因為執行檔需要旁邊的其他
+不需要 Python，也不需要任何安裝步驟 — 只要 `MapleStoryAnalyzer` 資料夾裡的
+`MapleStoryAnalyzer.exe` 就夠了。整個資料夾可以放到任何地方（例如
+`Desktop\MapleStoryAnalyzer`），但請保持資料夾完整，因為執行檔需要旁邊的其他
 檔案才能運作。
 
 ## 使用教學
 
 1. 確認楓之谷正在執行、視窗可見（啟動 HUD *之前* 不必是焦點視窗，但追蹤期間
    需要保持焦點，詳見「疑難排解」）。
-2. 雙擊 `MapleStoryAnalyer.exe`。由於這個執行檔沒有數位簽章，Windows 可能會
+2. 雙擊 `MapleStoryAnalyzer.exe`。由於這個執行檔沒有數位簽章，Windows 可能會
    跳出 SmartScreen 警告，請點 **更多資訊 → 仍要執行**。
-3. 會開啟一個標題為「MapleStoryAnalyer」的小視窗，永遠置頂，預設停在 **即時**
+3. 會開啟一個標題為「MapleStoryAnalyzer」的小視窗，永遠置頂，預設停在 **即時**
    分頁。只要找到遊戲視窗且它是焦點視窗，LV/HP/MP/EXP 就會在一兩秒內開始顯示
    數值。
 4. 點回遊戲正常遊玩即可，HUD 會在背景持續讀取。隨時可以切到 **紀錄** 分頁查

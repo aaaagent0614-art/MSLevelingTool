@@ -1,9 +1,9 @@
-# PyInstaller spec for the MapleStoryAnalyer HUD.
+# PyInstaller spec for the MapleStoryAnalyzer HUD.
 #
 # Build on Windows, from the repo root, inside the project venv:
 #   .venv\Scripts\pyinstaller scripts\maple_analyzer.spec --noconfirm
 #
-# Output: dist\MapleStoryAnalyer\MapleStoryAnalyer.exe (one-folder build --
+# Output: dist\MapleStoryAnalyzer\MapleStoryAnalyzer.exe (one-folder build --
 # faster startup than --onefile, and rapidocr's ONNX models are large enough
 # that unpacking them to a temp dir on every launch isn't worth it).
 
@@ -44,7 +44,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="MapleStoryAnalyer",
+    name="MapleStoryAnalyzer",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -61,5 +61,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="MapleStoryAnalyer",
+    name="MapleStoryAnalyzer",
 )
