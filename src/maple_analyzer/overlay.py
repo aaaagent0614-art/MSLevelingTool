@@ -36,7 +36,9 @@ simply torn down and rebuilt from `self._session_history` on switch.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import os
 import sys
 import time
 import tkinter as tk
@@ -62,9 +64,24 @@ if sys.stdout is None:
     # every bare print() elsewhere in this module (tick-error/debug
     # logging) the moment they run. Swap in a no-op sink so those stay
     # harmless instead of taking down the app.
-    sys.stdout = sys.stderr = open("nul" if sys.platform == "win32" else "/dev/null", "w")
+    #
+    # encoding/errors are NOT optional here: open() defaults to the locale
+    # codepage with errors='strict', i.e. cp950 on this zh-TW machine. The
+    # PP-OCR recognition dictionary is largely *Simplified* Chinese, so a
+    # garbage read (game window obscured, floating damage numbers over the
+    # panel) routinely produces characters Big5/cp950 cannot encode -- and
+    # printing one raised UnicodeEncodeError straight through the sink,
+    # killing the tick loop. Same errors="replace" the console path below
+    # has always had; the windowed build was the only place missing it.
+    sys.stdout = sys.stderr = open(
+        os.devnull, "w", encoding="utf-8", errors="replace"
+    )
 else:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr is not None:
+        # Tk writes uncaught-callback tracebacks here, and a traceback can
+        # carry the same unencodable OCR text in its repr.
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 if sys.platform == "win32":
     # Without declaring DPI awareness, Windows scales the whole rendered
@@ -549,19 +566,38 @@ class OverlayApp:
     # ---- tick loop ---------------------------------------------------------
 
     def _tick(self) -> None:
-        # Wrapping the whole tick: any unhandled exception here used to abort
-        # this call *before* rescheduling self.root.after(...), permanently
-        # freezing the HUD on stale data with no visible error (observed live
-        # -- a UnicodeEncodeError from printing a misread OCR character killed
-        # the loop, and the HUD sat there silently showing 'idle' while the
-        # user kept playing). Every path through this method must reschedule.
+        # Every path through this method must reschedule -- this loop is the
+        # only thing driving the HUD, so an exception escaping before
+        # self.root.after(...) freezes it permanently on stale data. The
+        # window itself stays responsive, which makes the failure especially
+        # confusing: buttons still click, Restart Session still "works", and
+        # nothing ever updates again.
+        #
+        # Hence both the except *and* the finally. The original try/except
+        # wasn't enough on its own: in the release .exe an unencodable OCR
+        # character raised UnicodeEncodeError out of _do_tick's debug print,
+        # and the handler's own `print(... {e!r})` re-raised on the same
+        # unencodable text, so the reschedule below was never reached (see
+        # the stdout-sink note at the top of this module for that trigger's
+        # actual fix, and _log for why logging can no longer raise at all).
+        # `finally` is what makes the loop survive the *next* such bug.
         next_delay = TARGET_MS
         try:
             next_delay = self._do_tick()
         except Exception as e:
-            print(f"[{time.strftime('%H:%M:%S')}] tick error: {e!r}", flush=True)
-            self._set_status_error(self._t("status_error_unknown", detail=str(e)))
-        self.root.after(next_delay, self._tick)
+            self._log(f"[{time.strftime('%H:%M:%S')}] tick error: {e!r}")
+            with contextlib.suppress(Exception):
+                self._set_status_error(self._t("status_error_unknown", detail=str(e)))
+        finally:
+            self.root.after(next_delay, self._tick)
+
+    @staticmethod
+    def _log(message: str) -> None:
+        """Debug logging must never be able to kill the tick loop -- it is the
+        least important thing this app does and has already taken the whole
+        HUD down once (see _tick)."""
+        with contextlib.suppress(Exception):
+            print(message, flush=True)
 
     def _do_tick(self) -> int:
         t0 = time.perf_counter()
@@ -575,8 +611,8 @@ class OverlayApp:
             return 2000
         field_text = {name: self._ocr.read_field(img) for name, img in field_images.items()}
         snap = parse_fields(field_text)
-        print(f"[{time.strftime('%H:%M:%S')}] fields={field_text}", flush=True)
-        print(f"          -> {snap}", flush=True)
+        self._log(f"[{time.strftime('%H:%M:%S')}] fields={field_text}")
+        self._log(f"          -> {snap}")
         # A single tick occasionally misses a field (combat effects/floating
         # damage numbers over the HP/MP bars, transient OCR confidence dips) --
         # observed live: HP briefly read as None while MP/EXP/LV parsed fine on
@@ -616,7 +652,7 @@ class OverlayApp:
         if self._session.start_exp is not None and self._session.elapsed() >= 1.0:
             summary = self._session.finalize(self._settings.window_min)
             self._session_history.append(summary)
-            print(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(summary, len(self._session_history))}", flush=True)
+            self._log(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(summary, len(self._session_history))}")
             self._append_history_card(summary, len(self._session_history))
         self._session.start()
 
@@ -720,20 +756,44 @@ class OverlayApp:
         mini_stat(0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
         mini_stat(1, self._t("history_mp_loss"), _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
 
+    @contextlib.contextmanager
+    def _modal(self):
+        """Run a blocking dialog. Two things have to happen around one:
+
+        1. `_modal_open` tells _do_tick not to finalize a session while a
+           dialog is up -- askstring/askyesno block on a *nested* Tk event
+           loop, which does not stop self.root.after() timers from firing,
+           so a session could otherwise roll over and insert a history card
+           underneath the open modal mid-edit.
+        2. -topmost has to come off for the duration. Tk dialogs are not
+           topmost themselves, so with the HUD pinned above everything the
+           dialog renders *behind* it -- while still holding a grab on all
+           input. The app looks frozen (clicks on the HUD, including Restart
+           Session, do nothing) with no visible cause, and stays that way
+           until the invisible dialog is found and dismissed.
+        """
+        self._modal_open = True
+        was_topmost = self._settings.topmost
+        if was_topmost:
+            self.root.attributes("-topmost", False)
+        try:
+            yield
+        finally:
+            self._modal_open = False
+            if was_topmost:
+                self.root.attributes("-topmost", True)
+
     def _on_rename_clicked(self, index: int, label: ctk.CTkLabel) -> None:
         # index is 1-based and stable -- session_history is append-only, so
         # index - 1 always still points at the same summary that was current
         # when this card was built.
         current = self._session_history[index - 1]
-        self._modal_open = True
-        try:
+        with self._modal():
             new_name = simpledialog.askstring(
                 self._t("rename_dialog_title"), self._t("rename_dialog_prompt"),
                 initialvalue=current.name or self._t("history_session", n=index),
                 parent=self.root,
             )
-        finally:
-            self._modal_open = False
         if new_name is None:
             return  # cancelled
         new_name = new_name.strip()
@@ -744,15 +804,12 @@ class OverlayApp:
     def _on_clear_history_clicked(self) -> None:
         if not self._session_history:
             return
-        self._modal_open = True  # see _do_tick's guard comment on _on_rename_clicked
-        try:
+        with self._modal():  # see _do_tick's guard comment on _modal()
             confirmed = messagebox.askyesno(
                 self._t("history_clear_confirm_title"),
                 self._t("history_clear_confirm_prompt", n=len(self._session_history)),
                 parent=self.root,
             )
-        finally:
-            self._modal_open = False
         if not confirmed:
             return
         self._session_history.clear()
