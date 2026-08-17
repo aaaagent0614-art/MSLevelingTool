@@ -48,6 +48,12 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "history_hp_loss": {"en": "HP LOSS", "zh": "HP 損失"},
     "history_mp_loss": {"en": "MP LOSS", "zh": "MP 損失"},
     "history_restarted_early": {"en": "restarted early", "zh": "提前重啟"},
+    "history_clear_button": {"en": "Clear History", "zh": "清除紀錄"},
+    "history_clear_confirm_title": {"en": "Clear history", "zh": "清除紀錄"},
+    "history_clear_confirm_prompt": {
+        "en": "Delete all {n} session(s)? This can't be undone.",
+        "zh": "刪除全部 {n} 筆紀錄？此動作無法復原。",
+    },
 
     "settings_window_scale": {"en": "WINDOW SCALE", "zh": "視窗縮放"},
     "settings_always_on_top": {"en": "Always on top", "zh": "永遠置頂"},
@@ -61,6 +67,11 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "settings_language": {"en": "LANGUAGE", "zh": "語言"},
 
     "unit_min": {"en": "min", "zh": "分鐘"},
+    "unit_min_short": {"en": "m", "zh": "分"},
+    "history_duration_early": {
+        "en": "{dur}{unit} of {target}{unit}, {label}",
+        "zh": "{dur}{unit}／{target}{unit}，{label}",
+    },
 
     "rename_dialog_title": {"en": "Rename session", "zh": "重新命名紀錄"},
     "rename_dialog_prompt": {"en": "Session name:", "zh": "紀錄名稱："},

@@ -9,3 +9,13 @@ venv/
 overlay_std*.log
 overlay.pid
 overlay_screenshot.png
+.pytest_cache/
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Dev/planning notes -- not part of the release repo
+DEVELOPMENT.md
+VERSIONS.md

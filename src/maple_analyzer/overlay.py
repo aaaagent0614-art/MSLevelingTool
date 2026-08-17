@@ -40,7 +40,7 @@ import dataclasses
 import sys
 import time
 import tkinter as tk
-from tkinter import simpledialog
+from tkinter import messagebox, simpledialog
 from typing import Protocol
 
 import customtkinter as ctk
@@ -56,7 +56,15 @@ from .settings import Settings
 # used to raise UnicodeEncodeError and silently kill the tick loop (see
 # _tick's try/except below for the other half of this fix). errors="replace"
 # swaps unencodable characters for '?' instead of crashing.
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stdout is None:
+    # PyInstaller's windowed build (console=False) has no stdout/stderr at
+    # all (both are None), which crashes not just .reconfigure() below but
+    # every bare print() elsewhere in this module (tick-error/debug
+    # logging) the moment they run. Swap in a no-op sink so those stay
+    # harmless instead of taking down the app.
+    sys.stdout = sys.stderr = open("nul" if sys.platform == "win32" else "/dev/null", "w")
+else:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 if sys.platform == "win32":
     # Without declaring DPI awareness, Windows scales the whole rendered
@@ -167,7 +175,10 @@ class OverlayApp:
         # per-tick data baked in) register themselves here as they're built,
         # so _apply_language() can walk this list and reconfigure every one
         # instead of _build_*_tab needing to be re-run from scratch.
-        self._i18n_labels: list[tuple[ctk.CTkBaseClass, str]] = []
+        self._i18n_labels: list[tuple[ctk.CTkBaseClass, str, int, bool]] = []
+        # Guards _do_tick's finalize-on-timeout check against the rename
+        # dialog's nested event loop -- see _do_tick and _on_rename_clicked.
+        self._modal_open = False
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -233,6 +244,12 @@ class OverlayApp:
         family = _FONT_FAMILY[self._settings.language]
         return (family, size, "bold") if bold else (family, size)
 
+    def _scale_header_text(self) -> str:
+        return self._t("settings_window_scale") + f" — {self._settings.scale_pct}%"
+
+    def _interval_header_text(self) -> str:
+        return self._t("settings_session_interval") + f" — {self._settings.window_min} {self._t('unit_min')}"
+
     def _i18n(self, widget: ctk.CTkBaseClass, key: str, size: int, bold: bool = True) -> ctk.CTkBaseClass:
         """Set a widget's text + font from a translation key and register it
         for re-translation on language switch. Use for any widget whose text
@@ -261,13 +278,8 @@ class OverlayApp:
 
         self._status_pill.configure(font=self._font(9, bold=True))
         self._timer_label.configure(font=self._font(10, bold=True))
-        self._scale_header_label.configure(
-            text=self._t("settings_window_scale") + f" — {self._settings.scale_pct}%", font=self._font(11, bold=True)
-        )
-        self._interval_header_label.configure(
-            text=self._t("settings_session_interval") + f" — {self._settings.window_min} {self._t('unit_min')}",
-            font=self._font(11, bold=True),
-        )
+        self._scale_header_label.configure(text=self._scale_header_text(), font=self._font(11, bold=True))
+        self._interval_header_label.configure(text=self._interval_header_text(), font=self._font(11, bold=True))
 
         # History cards mix translated chrome (SESSION #N, HP/MP LOSS) with
         # per-session data and aren't worth tracking widget-by-widget --
@@ -376,8 +388,16 @@ class OverlayApp:
         self._restart_button.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 2))
 
     def _build_history_tab(self, parent) -> None:
+        self._clear_history_button = ctk.CTkButton(
+            parent, command=self._on_clear_history_clicked,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=HP_COLOR,
+            corner_radius=9, height=28,
+        )
+        self._i18n(self._clear_history_button, "history_clear_button", size=11, bold=True)
+        self._clear_history_button.pack(fill="x", padx=2, pady=(2, 4))
+
         self._history_frame = ctk.CTkScrollableFrame(parent, fg_color=BG, label_text="")
-        self._history_frame.pack(fill="both", expand=True, padx=2, pady=2)
+        self._history_frame.pack(fill="both", expand=True, padx=2, pady=(0, 2))
         self._history_empty_label = ctk.CTkLabel(
             self._history_frame, text_color=INK_FAINT,
         )
@@ -400,7 +420,7 @@ class OverlayApp:
         # horizontal space) a fixed-width label at the end of a packed row
         # was getting clipped to invisible. The header always has room.
         self._scale_header_label = ctk.CTkLabel(
-            window_card, text=self._t("settings_window_scale") + f" — {self._settings.scale_pct}%",
+            window_card, text=self._scale_header_text(),
             anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
         )
         self._scale_header_label.pack(fill="x", padx=14, pady=(6, 1))
@@ -441,7 +461,7 @@ class OverlayApp:
         card.pack(fill="x", padx=2, pady=(0, 0))
 
         self._interval_header_label = ctk.CTkLabel(
-            card, text=self._t("settings_session_interval") + f" — {self._settings.window_min} {self._t('unit_min')}",
+            card, text=self._interval_header_text(),
             anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
         )
         self._interval_header_label.pack(fill="x", padx=14, pady=(6, 1))
@@ -481,7 +501,7 @@ class OverlayApp:
         if pct == self._settings.scale_pct:
             return
         self._settings.scale_pct = pct
-        self._scale_header_label.configure(text=self._t("settings_window_scale") + f" — {pct}%")
+        self._scale_header_label.configure(text=self._scale_header_text())
         # CTk's own scaling knobs: widget_scaling resizes fonts/padding/etc,
         # window_scaling resizes the geometry set via .geometry() -- both are
         # needed together, otherwise widgets end up mismatched against the
@@ -499,9 +519,7 @@ class OverlayApp:
 
     def _on_interval_changed(self, value: float) -> None:
         self._settings.window_min = round(value)
-        self._interval_header_label.configure(
-            text=self._t("settings_session_interval") + f" — {self._settings.window_min} {self._t('unit_min')}"
-        )
+        self._interval_header_label.configure(text=self._interval_header_text())
         # Doesn't retroactively affect the currently-running session's
         # already-baked-in target -- takes effect for the *next* session,
         # same as the interval_minutes recorded on SessionSummary.finalize().
@@ -573,7 +591,11 @@ class OverlayApp:
         self._last = merged
         self._session.record(merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct)
 
-        if self._session.elapsed() >= self._settings.window_min * 60:
+        # Skipped while a rename dialog is open: simpledialog.askstring blocks
+        # via a nested Tk event loop but doesn't stop self.root.after() timers
+        # from firing, so without this guard a session could finalize and
+        # insert a new history card underneath the open modal mid-edit.
+        if not self._modal_open and self._session.elapsed() >= self._settings.window_min * 60:
             self._finalize_and_restart_session()
 
         self._render(merged)
@@ -606,6 +628,12 @@ class OverlayApp:
         for card in self._history_cards:
             card.destroy()
         self._history_cards.clear()
+        if not self._session_history:
+            # _append_history_card only ever pack_forget()s this label (on
+            # the first card added) -- nothing re-packs it once the list is
+            # emptied again (e.g. via Clear History), so do it explicitly.
+            self._history_empty_label.pack(pady=24)
+            return
         # Cards are always inserted at the top (newest-first) -- rebuilding
         # oldest-first via _append_history_card reproduces the exact same
         # final order without needing separate "rebuild" layout logic.
@@ -638,12 +666,19 @@ class OverlayApp:
         # duration number when applicable, so this needs the language-aware
         # font -- the plain "10.0m" case doesn't strictly need it, but the
         # widget is rebuilt wholesale on language switch anyway either way.
+        unit = self._t("unit_min_short")
         if summary.interval_minutes is not None and abs(dur_min - summary.interval_minutes) > 0.05:
-            dur_text = f"{dur_min:.1f}{self._t('unit_min')[:1]} {self._t('history_restarted_early')}"
+            dur_text = self._t(
+                "history_duration_early",
+                dur=f"{dur_min:.1f}",
+                target=summary.interval_minutes,
+                unit=unit,
+                label=self._t("history_restarted_early"),
+            )
             dur_color = EXP_COLOR
             dur_font = self._font(11)
         else:
-            dur_text, dur_color, dur_font = f"{dur_min:.1f}m", INK_DIM, _FONT_MONO_SM
+            dur_text, dur_color, dur_font = f"{dur_min:.1f}{unit}", INK_DIM, _FONT_MONO_SM
         ctk.CTkLabel(head, text=dur_text, font=dur_font, text_color=dur_color).pack(side="right")
 
         timestamp = ctk.CTkFrame(card, fg_color="transparent")
@@ -690,17 +725,38 @@ class OverlayApp:
         # index - 1 always still points at the same summary that was current
         # when this card was built.
         current = self._session_history[index - 1]
-        new_name = simpledialog.askstring(
-            self._t("rename_dialog_title"), self._t("rename_dialog_prompt"),
-            initialvalue=current.name or self._t("history_session", n=index),
-            parent=self.root,
-        )
+        self._modal_open = True
+        try:
+            new_name = simpledialog.askstring(
+                self._t("rename_dialog_title"), self._t("rename_dialog_prompt"),
+                initialvalue=current.name or self._t("history_session", n=index),
+                parent=self.root,
+            )
+        finally:
+            self._modal_open = False
         if new_name is None:
             return  # cancelled
         new_name = new_name.strip()
         updated = dataclasses.replace(current, name=new_name or None)
         self._session_history[index - 1] = updated
         label.configure(text=updated.name or self._t("history_session", n=index))
+
+    def _on_clear_history_clicked(self) -> None:
+        if not self._session_history:
+            return
+        self._modal_open = True  # see _do_tick's guard comment on _on_rename_clicked
+        try:
+            confirmed = messagebox.askyesno(
+                self._t("history_clear_confirm_title"),
+                self._t("history_clear_confirm_prompt", n=len(self._session_history)),
+                parent=self.root,
+            )
+        finally:
+            self._modal_open = False
+        if not confirmed:
+            return
+        self._session_history.clear()
+        self._rebuild_history_cards()
 
     def _set_status_error(self, text: str) -> None:
         self._status_pill.configure(text=text, fg_color=SURFACE_2, text_color=HP_COLOR)
