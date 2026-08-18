@@ -45,7 +45,9 @@ anything to the game.
 - **Windows** — real screen capture needs a live Windows desktop; this
   won't run for real on macOS/Linux.
 - MapleStory installed and running.
-- **Game resolution: 1366×768** — currently the only supported resolution.
+- **Game resolution: 1366×768 or larger recommended.** Verified working at
+  both 1366×768 and 1920×1080. Bigger windows render the stat text larger and
+  read more reliably; very small windows misread more often.
 
 ## Install
 
@@ -109,6 +111,9 @@ identically whether started via the .exe or this command.
   screen, so whatever is on top would be read instead of your stats — it stops
   and waits rather than recording nonsense. Move the window (or the HUD) off
   that strip and tracking resumes within a couple of seconds.
+- **The stat bar is hidden behind the Windows taskbar.** With the game
+  maximised, the bottom stat strip can sit underneath the taskbar. Run the game
+  windowed, or set the taskbar to auto-hide.
 - **Status pill says "Game window minimized."** Restore the game window (it
   doesn't need to be the foreground window once tracking has started again,
   just not minimized).
@@ -136,6 +141,10 @@ identically whether started via the .exe or this command.
   if some options are cut off at very small scales.
 - **Want it to stop covering the game.** Settings → turn off "Always on top,"
   or just move/resize the window like any other.
+- **EXP occasionally pauses for a second before updating.** This is by design:
+  each reading is checked for plausibility, and a frame that fails is discarded
+  in favour of the last good value until the next frame reads correctly. Half a
+  second of staleness beats showing a wrong number.
 - **Session numbers look "off" after clicking Restart quickly twice.** By
   design, a restart within 1 second of the previous one is ignored (avoids
   logging a meaningless 0-duration entry) — this is expected, not a bug.
