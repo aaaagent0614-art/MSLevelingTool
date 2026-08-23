@@ -32,7 +32,7 @@ def _record(session, *, exp, pct=None, level=None, hp=800, mp=2800, hp_max=824, 
 
 
 def test_gain_is_positive_and_correct_across_a_level_up():
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=380_000, pct=88.72, level=44)
     _record(s, exp=428_194, pct=99.98, level=44)
@@ -46,7 +46,7 @@ def test_gain_is_positive_and_correct_across_a_level_up():
 
 def test_exp_diff_is_never_negative_after_a_level_up():
     """The visible symptom: _render prints exp_diff behind a hardcoded '+'."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=428_194, pct=99.98, level=44)
     _record(s, exp=54, pct=0.01, level=45)
@@ -54,7 +54,7 @@ def test_exp_diff_is_never_negative_after_a_level_up():
 
 
 def test_summary_reports_the_gain_not_end_minus_start():
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=380_000, pct=88.72, level=44)
     _record(s, exp=428_194, pct=99.98, level=44)
@@ -72,7 +72,7 @@ def test_summary_reports_the_gain_not_end_minus_start():
 def test_exp_drop_without_a_level_change_is_ignored():
     """An OCR misread, not a level-up. Counting it would inflate the gain by
     a whole level every time EXP is misread low."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=400_000, pct=93.4, level=44)
     _record(s, exp=4, pct=0.01, level=44)      # misread, level unchanged
@@ -83,7 +83,7 @@ def test_exp_drop_without_a_level_change_is_ignored():
 def test_level_is_optional_and_old_behaviour_holds_without_it():
     """record() is called without a level by existing tests and by any caller
     that doesn't parse one; a plain monotonic gain must still work."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
     s.record(exp_cur=1500, hp_cur=500, mp_cur=200)
@@ -94,7 +94,7 @@ def test_level_is_optional_and_old_behaviour_holds_without_it():
 
 
 def test_two_level_ups_in_one_session():
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=400_000, pct=93.4, level=44)     # lv44 total ~428,265
     _record(s, exp=20, pct=0.004, level=45)         # ding
@@ -107,7 +107,7 @@ def test_two_level_ups_in_one_session():
 def test_level_up_with_no_percentage_reading_does_not_produce_nonsense():
     """exp_pct is what derives the level's total EXP; without it the finished
     level's remainder is unknowable. Under-count, never invent."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=400_000, pct=None, level=44)
     _record(s, exp=54, pct=None, level=45)
@@ -119,7 +119,7 @@ def test_gain_still_accumulates_normally_within_one_level():
     # pct has to track cur: they are two readings of the same quantity, and
     # the cross-check in _exp_reading_is_trusted compares them. EXP quintupling
     # while the percentage sits still is not a state the game can be in.
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     for exp, pct in ((100, 0.02), (200, 0.04), (350, 0.07), (500, 0.10)):
         _record(s, exp=exp, pct=pct, level=44)
@@ -127,7 +127,7 @@ def test_gain_still_accumulates_normally_within_one_level():
 
 
 def test_restart_after_a_level_up_baselines_cleanly():
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=428_194, pct=99.98, level=44)
     _record(s, exp=54, pct=0.01, level=45)
@@ -143,7 +143,7 @@ def test_restart_after_a_level_up_baselines_cleanly():
 def test_real_captured_level_up_frames():
     """41 verbatim frames spanning the live LV44->45 transition, driven the
     way overlay._do_tick drives them (carry forward missing fields)."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     last = StatSnapshot(None, None, None, None, None, None, None)
     for frame in LEVELUP_FRAMES:
@@ -171,7 +171,7 @@ def test_a_single_garbage_reading_does_not_stick():
     never came back, because summing rises bakes in any absurd value forever.
     Measuring from the segment start instead means it is wrong for exactly one
     tick."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=10_133, pct=2.16, level=45)
     _record(s, exp=101_332_182, pct=None, level=45)   # garbage frame
@@ -185,7 +185,7 @@ def test_a_single_garbage_reading_does_not_stick():
 
 
 def test_a_low_misread_also_self_corrects():
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=5255, pct=1.12, level=45)
     _record(s, exp=255, pct=1.12, level=45)   # leading digit lost
@@ -196,7 +196,7 @@ def test_a_low_misread_also_self_corrects():
 def test_garbage_cannot_accumulate_over_many_ticks():
     """Repeated garbage must not compound -- each tick is measured from the
     segment start, so the total can only ever be wrong by the current frame."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.start()
     _record(s, exp=1000, pct=1.0, level=45)
     for _ in range(50):

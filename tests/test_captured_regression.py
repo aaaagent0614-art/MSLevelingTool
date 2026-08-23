@@ -45,7 +45,7 @@ def _unguarded_mp_loss(frames) -> int:
 
 
 def _guarded_session(frames) -> Session:
-    session = Session()
+    session = Session(require_calibration=False)
     session.start()
     for _snap, merged in _merged_stream(frames):
         session.record(
@@ -72,7 +72,7 @@ def test_no_single_tick_books_a_large_phantom_loss():
     """The failure was concentrated: two frames accounted for almost all of
     it (+114,486 and +21,931). No individual tick should move the total by
     anything like a full MP bar again."""
-    session = Session()
+    session = Session(require_calibration=False)
     session.start()
     previous = 0
     jumps = []

@@ -102,6 +102,10 @@ SCALE_STEP_PCT = 10
 SCALE_MIN_PCT = 50
 SCALE_MAX_PCT = 150
 
+# Live tab's Pause/Resume/Start + Restart button row -- see _apply_run_state.
+BUTTON_HEIGHT = 28
+STOPPED_BUTTON_WIDTH = 96  # Start alone, centered -- smaller than the two-button width
+
 # Color tokens, matching the approved HTML design preview.
 BG = "#0d1117"
 SURFACE = "#161b22"
@@ -128,15 +132,15 @@ _FONT_FAMILY: dict[Lang, str] = {"en": "Segoe UI", "zh": "Microsoft JhengHei"}
 # Fixed English-only chrome that never carries translated text (the game's
 # own on-screen abbreviations LV/HP/MP/EXP, and the +/- scale stepper) stays
 # on a plain Segoe UI tuple -- no language switching needed for pure ASCII.
-_FONT_LABEL = ("Segoe UI", 11, "bold")
+_FONT_LABEL = ("Segoe UI", 10, "bold")
 _FONT_UI_BOLD = ("Segoe UI", 13, "bold")
 
 # Pure-numeric value labels (HP/MP/EXP readouts, session EXP diffs, history
 # card numbers) stay on Consolas regardless of language -- they never render
 # CJK text, and Consolas' monospacing is what keeps tabular digits aligned.
-_FONT_MONO = ("Consolas", 13)
-_FONT_MONO_SM = ("Consolas", 11)
-_FONT_MONO_BOLD = ("Consolas", 13, "bold")
+_FONT_MONO = ("Consolas", 12)
+_FONT_MONO_SM = ("Consolas", 10)
+_FONT_MONO_BOLD = ("Consolas", 12, "bold")
 
 
 class PanelSource(Protocol):
@@ -197,6 +201,19 @@ class OverlayApp:
         # Guards _do_tick's finalize-on-timeout check against the rename
         # dialog's nested event loop -- see _do_tick and _on_rename_clicked.
         self._modal_open = False
+        # "running" / "paused" / "stopped" -- see _on_pause_button_clicked and
+        # _finalize_and_maybe_stop. "stopped" reached via the timer is
+        # implemented by pausing the already-running Session (its clock
+        # freezes and record() no-ops, exactly what "stopped" needs) rather
+        # than adding a third Session state; starting "stopped" here needs no
+        # such call since nothing has fed this fresh Session a tick yet --
+        # _do_tick simply doesn't call session.record() until Start is
+        # clicked, so it can't begin calibrating or accumulating unasked.
+        #
+        # Starts stopped rather than tracking immediately on launch -- opening
+        # the app (or the .exe) shouldn't silently start a session before the
+        # user has actually arrived at the game and decided to track.
+        self._run_state = "stopped"
         # Last capture failure message, so _do_tick can log state changes
         # instead of repeating the same line every 2s retry.
         self._last_capture_error: str | None = None
@@ -237,6 +254,7 @@ class OverlayApp:
         self._build_settings_tab(self._tabview.tab(self._tab_names["settings"]))
         self._tabview.set(self._tab_names["live"])  # CTkTabview defaults to the last-added tab otherwise
         self._apply_visibility()
+        self._apply_run_state()
 
         self._tick()
 
@@ -304,6 +322,10 @@ class OverlayApp:
         self._timer_label.configure(font=self._font(10, bold=True))
         self._scale_header_label.configure(text=self._scale_header_text(), font=self._font(11, bold=True))
         self._interval_header_label.configure(text=self._interval_header_text(), font=self._font(11, bold=True))
+        # _pause_button's text depends on _run_state, not just language, so it
+        # isn't in _i18n_labels -- _apply_run_state() re-derives it from
+        # scratch, which also happens to pick up the new language/font.
+        self._apply_run_state()
 
         # History cards mix translated chrome (SESSION #N, HP/MP LOSS) with
         # per-session data and aren't worth tracking widget-by-widget --
@@ -363,14 +385,14 @@ class OverlayApp:
 
         def add_stat_row(row: int, key: str, label_text: str, color: str, with_bar: bool) -> None:
             lbl = ctk.CTkLabel(stats, text=label_text, font=_FONT_LABEL, text_color=color, anchor="w")
-            lbl.grid(row=row, column=0, sticky="w", padx=(14, 8), pady=2)
+            lbl.grid(row=row, column=0, sticky="w", padx=(12, 6), pady=0)
             value = ctk.CTkLabel(stats, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
-            value.grid(row=row, column=2, sticky="e", padx=(8, 14), pady=2)
+            value.grid(row=row, column=2, sticky="e", padx=(6, 12), pady=0)
             bar = None
             if with_bar:
-                bar = ctk.CTkProgressBar(stats, height=6, progress_color=color, fg_color=SURFACE_2)
+                bar = ctk.CTkProgressBar(stats, height=5, progress_color=color, fg_color=SURFACE_2)
                 bar.set(0)
-                bar.grid(row=row, column=1, sticky="ew", padx=6, pady=2)
+                bar.grid(row=row, column=1, sticky="ew", padx=6, pady=0)
                 self._bars[key] = bar
             self._stat_rows[key] = (lbl, bar, value)
             self._value_labels[key] = value
@@ -390,26 +412,44 @@ class OverlayApp:
 
         def add_kv_row(row: int, key: str, i18n_key: str) -> None:
             lbl = ctk.CTkLabel(session_card, text_color=INK_DIM, anchor="w")
-            self._i18n(lbl, i18n_key, size=13, bold=False)
-            lbl.grid(row=row, column=0, sticky="w", padx=(14, 8), pady=1)
+            self._i18n(lbl, i18n_key, size=11, bold=False)
+            lbl.grid(row=row, column=0, sticky="w", padx=(12, 6), pady=0)
             value = ctk.CTkLabel(session_card, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
-            value.grid(row=row, column=1, sticky="e", padx=(8, 14), pady=1)
+            value.grid(row=row, column=1, sticky="e", padx=(6, 12), pady=0)
             self._kv_rows[key] = (lbl, value)
             self._value_labels[key] = value
 
         add_kv_row(0, "startexp", "kv_start_exp")
         add_kv_row(1, "expdiff", "kv_exp_diff")
         add_kv_row(2, "eta", "kv_eta")
-        add_kv_row(3, "hploss", "kv_hp_loss")
-        add_kv_row(4, "mploss", "kv_mp_loss")
+        add_kv_row(3, "projexp", "kv_proj_exp")
+        add_kv_row(4, "hploss", "kv_hp_loss")
+        add_kv_row(5, "mploss", "kv_mp_loss")
+
+        # Two buttons share one row: the left one cycles Pause/Resume/Start
+        # depending on _run_state (see _on_pause_button_clicked), the right
+        # one is the unconditional manual Restart -- hidden only in the
+        # "stopped" state, where Start already covers beginning a new
+        # session and a separate Restart would have nothing to restart from.
+        button_row = ctk.CTkFrame(parent, fg_color="transparent")
+        button_row.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 2))
+        button_row.grid_columnconfigure(0, weight=1)
+        button_row.grid_columnconfigure(1, weight=1)
+
+        self._pause_button = ctk.CTkButton(
+            button_row, command=self._on_pause_button_clicked,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
+            corner_radius=9, height=BUTTON_HEIGHT,
+        )
+        self._pause_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
 
         self._restart_button = ctk.CTkButton(
-            parent, command=self._on_restart_clicked,
+            button_row, command=self._on_restart_clicked,
             fg_color=ACCENT, text_color=ACCENT_INK, hover_color="#7ff2e0",
-            corner_radius=9, height=32,
+            corner_radius=9, height=BUTTON_HEIGHT,
         )
         self._i18n(self._restart_button, "restart_button", size=13, bold=True)
-        self._restart_button.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 2))
+        self._restart_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
 
     def _build_history_tab(self, parent) -> None:
         self._clear_history_button = ctk.CTkButton(
@@ -445,11 +485,11 @@ class OverlayApp:
         # was getting clipped to invisible. The header always has room.
         self._scale_header_label = ctk.CTkLabel(
             window_card, text=self._scale_header_text(),
-            anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
+            anchor="w", text_color=INK_DIM, font=self._font(10, bold=True),
         )
-        self._scale_header_label.pack(fill="x", padx=14, pady=(6, 1))
+        self._scale_header_label.pack(fill="x", padx=12, pady=(5, 0))
         scale_row = ctk.CTkFrame(window_card, fg_color="transparent")
-        scale_row.pack(fill="x", padx=14, pady=(0, 4))
+        scale_row.pack(fill="x", padx=12, pady=(0, 3))
         # A +/- stepper instead of a slider -- a small draggable handle at
         # this widget size was fiddly to land on an exact value; discrete
         # SCALE_STEP_PCT taps are precise and don't need fine motor control.
@@ -467,12 +507,12 @@ class OverlayApp:
             window_card, variable=self._topmost_var, text_color=INK,
             progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
             command=self._on_topmost_changed,
-        ), "settings_always_on_top", size=13, bold=False).pack(fill="x", padx=14, pady=(0, 6))
+        ), "settings_always_on_top", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 3))
 
         lang_row = ctk.CTkFrame(window_card, fg_color="transparent")
-        lang_row.pack(fill="x", padx=14, pady=(0, 6))
+        lang_row.pack(fill="x", padx=12, pady=(0, 4))
         self._i18n(
-            ctk.CTkLabel(lang_row, anchor="w", text_color=INK_DIM), "settings_language", size=11, bold=True
+            ctk.CTkLabel(lang_row, anchor="w", text_color=INK_DIM), "settings_language", size=10, bold=True
         ).pack(side="left")
         self._lang_button = ctk.CTkSegmentedButton(
             lang_row, values=["中文", "EN"], command=self._on_language_button_changed,
@@ -486,11 +526,11 @@ class OverlayApp:
 
         self._interval_header_label = ctk.CTkLabel(
             card, text=self._interval_header_text(),
-            anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
+            anchor="w", text_color=INK_DIM, font=self._font(10, bold=True),
         )
-        self._interval_header_label.pack(fill="x", padx=14, pady=(6, 1))
+        self._interval_header_label.pack(fill="x", padx=12, pady=(5, 0))
         slider_row = ctk.CTkFrame(card, fg_color="transparent")
-        slider_row.pack(fill="x", padx=14, pady=(0, 3))
+        slider_row.pack(fill="x", padx=12, pady=(0, 2))
         slider = ctk.CTkSlider(
             slider_row, from_=1, to=60, number_of_steps=59, command=self._on_interval_changed,
             progress_color=ACCENT, button_color=ACCENT, button_hover_color="#7ff2e0",
@@ -499,8 +539,8 @@ class OverlayApp:
         slider.pack(fill="x", expand=True)
 
         self._i18n(
-            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_display", size=11, bold=True
-        ).pack(fill="x", padx=14, pady=(2, 1))
+            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_display", size=10, bold=True
+        ).pack(fill="x", padx=12, pady=(2, 0))
 
         self._switch_vars: dict[str, tk.BooleanVar] = {}
         for key, i18n_key, attr in (
@@ -509,6 +549,7 @@ class OverlayApp:
             ("exp", "settings_show_exp", "show_exp"),
             ("exp_pct", "settings_show_exp_pct", "show_exp_pct"),
             ("eta", "settings_show_eta", "show_eta"),
+            ("proj_exp", "settings_show_proj_exp", "show_proj_exp"),
         ):
             var = tk.BooleanVar(value=getattr(self._settings, attr))
             self._switch_vars[key] = var
@@ -516,7 +557,28 @@ class OverlayApp:
                 card, variable=var, text_color=INK,
                 progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
                 command=lambda k=key, a=attr, v=var: self._on_switch_changed(k, a, v),
-            ), i18n_key, size=13, bold=False).pack(fill="x", padx=14, pady=1)
+            ), i18n_key, size=11, bold=False).pack(fill="x", padx=12, pady=0)
+
+        # SESSION: behaviour switches, not display toggles -- neither one
+        # hides/shows a widget, so they bypass _on_switch_changed/_apply_visibility
+        # entirely (see _on_auto_stop_changed/_on_save_on_restart_changed).
+        self._i18n(
+            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_session", size=10, bold=True
+        ).pack(fill="x", padx=12, pady=(3, 0))
+
+        self._auto_stop_var = tk.BooleanVar(value=self._settings.auto_stop)
+        self._i18n(ctk.CTkSwitch(
+            card, variable=self._auto_stop_var, text_color=INK,
+            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
+            command=self._on_auto_stop_changed,
+        ), "settings_auto_stop", size=11, bold=False).pack(fill="x", padx=12, pady=0)
+
+        self._save_on_restart_var = tk.BooleanVar(value=self._settings.save_on_restart)
+        self._i18n(ctk.CTkSwitch(
+            card, variable=self._save_on_restart_var, text_color=INK,
+            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
+            command=self._on_save_on_restart_changed,
+        ), "settings_save_on_restart", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 4))
 
     # ---- settings callbacks ------------------------------------------------
 
@@ -554,6 +616,12 @@ class OverlayApp:
             self._apply_visibility()
         self._render(self._last)  # immediate feedback
 
+    def _on_auto_stop_changed(self) -> None:
+        self._settings.auto_stop = self._auto_stop_var.get()
+
+    def _on_save_on_restart_changed(self) -> None:
+        self._settings.save_on_restart = self._save_on_restart_var.get()
+
     def _apply_visibility(self) -> None:
         s = self._settings
         visible_stats = {"level": True, "hp": s.show_hp, "mp": s.show_mp, "exp": s.show_exp}
@@ -564,7 +632,7 @@ class OverlayApp:
 
         visible_kv = {
             "startexp": True, "expdiff": True, "eta": s.show_eta,
-            "hploss": s.show_hp, "mploss": s.show_mp,
+            "projexp": s.show_proj_exp, "hploss": s.show_hp, "mploss": s.show_mp,
         }
         for key, (lbl, value) in self._kv_rows.items():
             for w in (lbl, value):
@@ -623,6 +691,16 @@ class OverlayApp:
                 self._log(f"[{time.strftime('%H:%M:%S')}] capture unavailable: {e}")
                 self._last_capture_error = str(e)
             self._set_status_error(self._localize_error(str(e)))
+            # The session clock is wall-clock time (Session.elapsed()), not
+            # tick-driven, so it keeps running even while OCR can't read the
+            # panel (game window covered, alt-tabbed away, minimized). Both
+            # of these used to be skipped entirely on this path: the timer
+            # chip froze at its last-rendered text even though the real
+            # countdown kept going underneath, and a session whose window
+            # stayed blocked past its interval would never auto-finalize at
+            # all, silently overrunning forever.
+            self._update_timer_label()
+            self._maybe_finalize_on_timeout()
             return 2000
         if self._last_capture_error is not None:
             self._log(f"[{time.strftime('%H:%M:%S')}] capture recovered")
@@ -665,26 +743,60 @@ class OverlayApp:
         # LV crop would have stopped a session recording anything at all.
         # tests/test_captured_regression.py replays the real failure through
         # this path with no gate in front of it.
-        self._session.record(
-            merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct,
-            hp_max=merged.hp_max, mp_max=merged.mp_max, level=merged.level,
-        )
+        # Gated on run_state rather than relying on Session's own pause/no-op
+        # behaviour: while "stopped" the Session may never have been started
+        # at all (see _run_state's docstring in __init__), and feeding it
+        # ticks here would silently begin calibrating/tracking a session the
+        # user hasn't asked for yet.
+        if self._run_state == "running":
+            self._session.record(
+                merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct,
+                hp_max=merged.hp_max, mp_max=merged.mp_max, level=merged.level,
+            )
 
-        # Skipped while a rename dialog is open: simpledialog.askstring blocks
-        # via a nested Tk event loop but doesn't stop self.root.after() timers
-        # from firing, so without this guard a session could finalize and
-        # insert a new history card underneath the open modal mid-edit.
-        if not self._modal_open and self._session.elapsed() >= self._settings.window_min * 60:
-            self._finalize_and_restart_session()
+        self._maybe_finalize_on_timeout()
 
         self._render(merged)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         return max(0, int(TARGET_MS - elapsed_ms))
 
-    def _finalize_and_restart_session(self) -> None:
-        # Shared by both the timer check above and the manual restart button
-        # -- exactly one code path finalizes+logs+restarts, so a button click
-        # landing on the same tick as the timer firing can't double-log.
+    def _update_timer_label(self) -> None:
+        """Split out of _render so the capture-error path in _do_tick can
+        keep the countdown moving without running a full render against
+        stale/absent OCR data."""
+        if self._run_state == "stopped":
+            # A stopped session (including the very first one, before Start
+            # is ever clicked) has no countdown running -- showing a static
+            # "10:00" the whole time would look like a stuck timer rather
+            # than a genuinely inactive one.
+            self._timer_label.configure(text="--:--")
+            return
+        remaining = max(0.0, self._settings.window_min * 60 - self._session.elapsed())
+        remaining_s = f"{int(remaining // 60)}:{int(remaining % 60):02d}"
+        self._timer_label.configure(text=self._t("timer_left", time=remaining_s))
+
+    def _maybe_finalize_on_timeout(self) -> None:
+        # Skipped while a rename dialog is open: simpledialog.askstring blocks
+        # via a nested Tk event loop but doesn't stop self.root.after() timers
+        # from firing, so without this guard a session could finalize and
+        # insert a new history card underneath the open modal mid-edit. Also
+        # skipped outright unless actually running: elapsed() is frozen while
+        # paused/stopped anyway, so this wouldn't fire either way, but being
+        # explicit here means it can't ever race a state change mid-tick.
+        #
+        # Called from both branches of _do_tick (capture success and capture
+        # failure) -- Session.elapsed() is wall-clock time, not tick-driven,
+        # so a session must still be able to hit its interval and finalize
+        # even while the game window is covered/minimized for the whole
+        # window, not just while OCR happens to be succeeding.
+        if not self._modal_open and self._run_state == "running" \
+                and self._session.elapsed() >= self._settings.window_min * 60:
+            self._finalize_and_maybe_stop()
+
+    def _commit_session_to_history(self) -> None:
+        # Shared by the timer rollover and a manual restart with
+        # save_on_restart on -- exactly one code path commits, so two
+        # triggers landing on the same tick can't double-log.
         # Skip logging if the session never got a real EXP reading (restart
         # clicked immediately after launch, before OCR produced anything --
         # a '? -> ?' entry would just be noise), or if essentially no time
@@ -697,11 +809,63 @@ class OverlayApp:
             self._session_history.append(summary)
             self._log(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(summary, len(self._session_history))}")
             self._append_history_card(summary, len(self._session_history))
-        self._session.start()
+
+    def _finalize_and_maybe_stop(self) -> None:
+        """The timer rolling over. Always commits to History first; then
+        either stops (default -- see settings.auto_stop) or immediately
+        starts the next session, the only behaviour before that setting
+        existed."""
+        self._commit_session_to_history()
+        if self._settings.auto_stop:
+            # Reuses Session.pause() rather than adding a third Session
+            # state: it freezes elapsed() at exactly this instant and makes
+            # record() a no-op, which is exactly what "stopped" needs, and
+            # nothing else in rate.py has to know "stopped" exists.
+            self._session.pause()
+            self._run_state = "stopped"
+            self._apply_run_state()
+        else:
+            self._session.start()
 
     def _on_restart_clicked(self) -> None:
-        self._finalize_and_restart_session()
+        if self._settings.save_on_restart:
+            self._commit_session_to_history()
+        self._session.start()  # resets pause state too, so a restart from "paused" lands in "running"
+        self._run_state = "running"
+        self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
+
+    def _on_pause_button_clicked(self) -> None:
+        """One button, three roles depending on _run_state -- see
+        _apply_run_state for how its label/command follow that state."""
+        if self._run_state == "running":
+            self._session.pause()
+            self._run_state = "paused"
+        elif self._run_state == "paused":
+            self._session.resume()
+            self._run_state = "running"
+        else:  # "stopped" -- already committed to History by _finalize_and_maybe_stop
+            self._session.start()
+            self._run_state = "running"
+        self._apply_run_state()
+        self._render(self._last)  # immediate feedback, don't wait for next tick
+
+    def _apply_run_state(self) -> None:
+        label_key = {"running": "pause_button", "paused": "resume_button", "stopped": "start_button"}[self._run_state]
+        self._pause_button.configure(text=self._t(label_key), font=self._font(12, bold=True))
+        # A Restart with nothing running/paused to restart from doesn't mean
+        # anything -- Start (the pause button's role while stopped) already
+        # covers beginning the next session. As the sole button in the row
+        # it's centered and shrunk rather than stretched across both
+        # columns the way the two-button running/paused layout is.
+        if self._run_state == "stopped":
+            self._restart_button.grid_remove()
+            self._pause_button.configure(width=STOPPED_BUTTON_WIDTH, height=BUTTON_HEIGHT)
+            self._pause_button.grid(row=0, column=0, columnspan=2, sticky="", padx=0)
+        else:
+            self._pause_button.configure(width=140, height=BUTTON_HEIGHT)  # CTkButton's own default width
+            self._pause_button.grid(row=0, column=0, columnspan=1, sticky="ew", padx=(0, 3))
+            self._restart_button.grid(row=0, column=1, columnspan=1, sticky="ew", padx=(3, 0))
 
     def _rebuild_history_cards(self) -> None:
         for card in self._history_cards:
@@ -740,6 +904,15 @@ class OverlayApp:
         )
         title_label.pack(side="left")
         title_label.bind("<Button-1>", lambda _e, i=index, lbl=title_label: self._on_rename_clicked(i, lbl))
+
+        # Packed before dur_text below so it lands rightmost -- pack(side="right")
+        # stacks from the outer edge inward in packing order, so whichever
+        # side="right" widget is packed first ends up furthest right.
+        ctk.CTkButton(
+            head, text="×", width=22, height=18, command=lambda i=index: self._on_delete_history_clicked(i),
+            fg_color="transparent", hover_color=SURFACE_2, text_color=INK_FAINT, font=_FONT_UI_BOLD,
+        ).pack(side="right")
+
         dur_min = summary.duration_s / 60
         # Mixes translated chrome ("restarted early"/提前重啟) with the
         # duration number when applicable, so this needs the language-aware
@@ -827,9 +1000,11 @@ class OverlayApp:
                 self.root.attributes("-topmost", True)
 
     def _on_rename_clicked(self, index: int, label: ctk.CTkLabel) -> None:
-        # index is 1-based and stable -- session_history is append-only, so
-        # index - 1 always still points at the same summary that was current
-        # when this card was built.
+        # index is 1-based. session_history is no longer strictly append-only
+        # (see _on_delete_history_clicked), but deleting any entry rebuilds
+        # every card from scratch via _rebuild_history_cards(), so a *live*
+        # card's index - 1 is always still correct: it can only go stale by
+        # having its own card destroyed and recreated with the new one first.
         current = self._session_history[index - 1]
         with self._modal():
             new_name = simpledialog.askstring(
@@ -843,6 +1018,25 @@ class OverlayApp:
         updated = dataclasses.replace(current, name=new_name or None)
         self._session_history[index - 1] = updated
         label.configure(text=updated.name or self._t("history_session", n=index))
+
+    def _on_delete_history_clicked(self, index: int) -> None:
+        summary = self._session_history[index - 1]
+        with self._modal():  # see _do_tick's guard comment on _modal()
+            confirmed = messagebox.askyesno(
+                self._t("history_delete_confirm_title"),
+                self._t(
+                    "history_delete_confirm_prompt",
+                    name=summary.name or self._t("history_session", n=index),
+                ),
+                parent=self.root,
+            )
+        if not confirmed:
+            return
+        del self._session_history[index - 1]
+        # Every remaining card's 1-based index shifts once one entry is
+        # removed -- rebuild from scratch rather than patching indices in
+        # place, same as _on_clear_history_clicked already does.
+        self._rebuild_history_cards()
 
     def _on_clear_history_clicked(self) -> None:
         if not self._session_history:
@@ -891,9 +1085,7 @@ class OverlayApp:
         start_exp = self._session.start_exp
         self._value_labels["startexp"].configure(text=f"{start_exp:,}" if start_exp is not None else "--")
 
-        remaining = max(0.0, self._settings.window_min * 60 - self._session.elapsed())
-        remaining_s = f"{int(remaining // 60)}:{int(remaining % 60):02d}"
-        self._timer_label.configure(text=self._t("timer_left", time=remaining_s))
+        self._update_timer_label()
 
         exp_diff = self._session.exp_diff
         # Total EXP required for the current level isn't shown directly by the
@@ -923,6 +1115,17 @@ class OverlayApp:
                 eta_s = remaining_exp / rate_per_sec
         self._value_labels["eta"].configure(text=_fmt_duration(eta_s) if eta_s is not None else "--")
 
+        # Projected session total: current rate extrapolated across the full
+        # window setting, not just what's elapsed so far -- see
+        # Session.projected_exp (same 3s/positive-gain guard as ETA above,
+        # for the same reason).
+        proj = self._session.projected_exp(self._settings.window_min * 60)
+        if proj is not None:
+            proj_pct_s = f"  (+{proj / total_exp * 100:.2f}%)" if total_exp and self._settings.show_exp_pct else ""
+            self._value_labels["projexp"].configure(text=f"+{proj:,}{proj_pct_s}")
+        else:
+            self._value_labels["projexp"].configure(text="--")
+
         hp_loss, mp_loss = self._session.hp_loss, self._session.mp_loss
         self._value_labels["hploss"].configure(
             text=_fmt_loss(hp_loss), text_color=HP_COLOR if hp_loss > 0 else INK_FAINT
@@ -931,13 +1134,24 @@ class OverlayApp:
             text=_fmt_loss(mp_loss), text_color=MP_COLOR if mp_loss > 0 else INK_FAINT
         )
 
-        # Idle only if NONE of HP/MP/EXP have changed recently within this
-        # session -- any one of them moving counts as activity, not idle.
-        idle = hp_loss == 0 and mp_loss == 0 and (exp_diff or 0) == 0
-        if idle:
-            self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
+        # Pause/stop/calibration are user- or engine-driven states that take
+        # priority over the activity-based idle/tracking read below -- e.g. a
+        # paused session with real HP/MP/EXP movement in its history isn't
+        # "Idle", it's "Paused".
+        if self._run_state == "paused":
+            self._status_pill.configure(text=self._t("status_paused"), fg_color=SURFACE_2, text_color=EXP_COLOR)
+        elif self._run_state == "stopped":
+            self._status_pill.configure(text=self._t("status_stopped"), fg_color=SURFACE_2, text_color=INK_DIM)
+        elif self._session.is_calibrating:
+            self._status_pill.configure(text=self._t("status_calibrating"), fg_color=SURFACE_2, text_color=EXP_COLOR)
         else:
-            self._status_pill.configure(text=self._t("status_tracking"), fg_color=TRACK_BG, text_color=OK_COLOR)
+            # Idle only if NONE of HP/MP/EXP have changed recently within this
+            # session -- any one of them moving counts as activity, not idle.
+            idle = hp_loss == 0 and mp_loss == 0 and (exp_diff or 0) == 0
+            if idle:
+                self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
+            else:
+                self._status_pill.configure(text=self._t("status_tracking"), fg_color=TRACK_BG, text_color=OK_COLOR)
 
     def run(self) -> None:
         self.root.mainloop()

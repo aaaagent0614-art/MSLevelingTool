@@ -5,14 +5,14 @@ from maple_analyzer.rate import Session
 
 
 def test_start_exp_set_on_first_record():
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
     assert s.start_exp == 1000
     assert s.exp_diff == 0
 
 
 def test_exp_diff_tracks_gain():
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
     s.record(exp_cur=1500, hp_cur=500, mp_cur=200)
     assert s.exp_diff == 500
@@ -21,7 +21,7 @@ def test_exp_diff_tracks_gain():
 def test_hp_mp_loss_only_accumulates_on_decrease():
     # Normal-sized moves are within _LossTracker.OUTLIER_FRACTION and are
     # taken immediately -- the noise guards add no lag to ordinary play.
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
     s.record(exp_cur=1000, hp_cur=400, mp_cur=150)  # lost 100 HP, 50 MP
     s.record(exp_cur=1000, hp_cur=450, mp_cur=180)  # healed -- no loss added
@@ -31,7 +31,7 @@ def test_hp_mp_loss_only_accumulates_on_decrease():
 
 
 def test_sustained_loss_is_counted_in_full():
-    s = Session()
+    s = Session(require_calibration=False)
     for hp in (824, 700, 600, 500, 500):
         s.record(exp_cur=1000, hp_cur=hp, mp_cur=200, hp_max=824)
     assert s.hp_loss == 324  # 824 -> 500, all of it
@@ -40,7 +40,7 @@ def test_sustained_loss_is_counted_in_full():
 def test_large_real_drop_lands_one_tick_late():
     """A one-shot big enough to look like a misread is held for one tick, then
     committed in full once the next reading corroborates it."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=824, mp_cur=200, hp_max=824)
     s.record(exp_cur=1000, hp_cur=90, mp_cur=200, hp_max=824)  # held
     assert s.hp_loss == 0
@@ -51,7 +51,7 @@ def test_large_real_drop_lands_one_tick_late():
 def test_alternating_misreads_book_nothing():
     """The regime that broke a median-of-3 filter: every other tick corrupt.
     Real MP here only regenerates, so the truth is zero loss."""
-    s = Session()
+    s = Session(require_calibration=False)
     for mp in [1663, 3, 1663, 16, 1663, 166, 1663] * 20:
         s.record(exp_cur=1000, hp_cur=500, mp_cur=mp, mp_max=2816)
     assert s.mp_loss == 0
@@ -65,7 +65,7 @@ def test_phantom_high_read_is_bounded_not_unbounded():
     tolerance band -- indistinguishable from drinking a potion, so it is
     accepted. Pinned here to record that the damage is bounded by the size of
     the bar rather than accumulating without limit as it used to."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=2700, mp_max=2816)  # phantom high
     s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
@@ -76,7 +76,7 @@ def test_phantom_high_read_is_bounded_not_unbounded():
 def test_single_tick_misread_books_no_loss():
     """The reported bug: an idle character accumulating huge MP 'loss'.
     '1663 -> 3 -> 1663' is a misread, not a drop."""
-    s = Session()
+    s = Session(require_calibration=False)
     for mp in (1663, 3, 1663, 16, 1663, 166, 1663):
         s.record(exp_cur=1000, hp_cur=500, mp_cur=mp, mp_max=2816)
     assert s.mp_loss == 0
@@ -86,7 +86,7 @@ def test_misparsed_max_rejects_the_whole_tick():
     """'1663/2816' misread as '16632/816' reads high, then books a huge
     phantom loss when the next correct read 'drops' back. The max mismatch
     (816 != 2816) is the tell, so the tick never reaches the loss math."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=16632, mp_max=816)  # rejected
     s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
@@ -95,18 +95,36 @@ def test_misparsed_max_rejects_the_whole_tick():
 
 
 def test_real_max_change_is_accepted_once_corroborated():
-    """A level-up genuinely raises max -- the guard must not wedge shut."""
-    s = Session()
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=1700, mp_max=3000)  # held
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=1700, mp_max=3000)  # corroborated
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=1600, mp_max=3000)
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=1500, mp_max=3000)
+    """A level-up genuinely raises max -- the guard must not wedge shut.
+    Accompanied by a level bump, 2 corroborating ticks suffice (see
+    _LossTracker._accept_max's level-aware corroboration); with no level
+    bump at all it takes 3 (test_level_change_without_a_level_bump_needs_a_third_tick)."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816, level=44)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1700, mp_max=3000, level=45)  # held
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1700, mp_max=3000, level=45)  # corroborated -- level bump halves the wait
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1600, mp_max=3000, level=45)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1500, mp_max=3000, level=45)
     assert s.mp_loss == 200  # tracking normally again at the new max
 
 
+def test_max_change_without_a_level_bump_needs_a_third_tick():
+    """The same change, but with no level info at all -- static OCR garbage
+    from a covered panel repeats an identical wrong max every tick with no
+    level movement either, so an unaccompanied max change is held one tick
+    longer before it's trusted."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1700, mp_max=3000)  # candidate, 1/3
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1700, mp_max=3000)  # 2/3 -- not yet enough
+    assert s.mp_loss == 0
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1600, mp_max=3000)  # 3/3 -- corroborated, and this tick's own drop counts
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=1500, mp_max=3000)
+    assert s.mp_loss == 163  # 1663 -> 1600 (63) -> 1500 (100); the held 1700 reading never counted
+
+
 def test_missing_reading_does_not_corrupt_loss_tracking():
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
     s.record(exp_cur=None, hp_cur=None, mp_cur=None)  # a tick that missed everything
     s.record(exp_cur=1000, hp_cur=450, mp_cur=200)
@@ -114,7 +132,7 @@ def test_missing_reading_does_not_corrupt_loss_tracking():
 
 
 def test_finalize_produces_correct_summary():
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200, exp_pct=10.0)
     s.record(exp_cur=1200, hp_cur=400, mp_cur=200)
     summary = s.finalize(interval_minutes=5, now=s._start_time + 60)
@@ -131,7 +149,7 @@ def test_finalize_produces_correct_summary():
 
 
 def test_restart_carries_forward_last_values():
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
     s.record(exp_cur=1200, hp_cur=400, mp_cur=180)
     s.start()  # simulates restart -- new session should baseline off last-known values
@@ -145,7 +163,7 @@ def test_restart_carries_forward_last_values():
 def test_summary_is_renamable_via_dataclasses_replace():
     # SessionSummary is frozen -- the History tab's rename feature works by
     # replacing the stored summary, not mutating it in place.
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
     summary = s.finalize()
     renamed = dataclasses.replace(summary, name="grinding spot A")
@@ -160,7 +178,7 @@ def test_implausible_max_is_never_adopted_however_often_it_repeats():
     capture (2026-08-17): '2816' misread as '281616' installed a bogus max,
     after which a bogus cur of 28163 passed every check and booked 25,347 of
     phantom loss the moment the panel came back."""
-    s = Session()
+    s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=2816, mp_max=2816)
     for _ in range(20):  # static garbage, repeated
         s.record(exp_cur=1000, hp_cur=500, mp_cur=28163, mp_max=281616)
@@ -170,9 +188,9 @@ def test_implausible_max_is_never_adopted_however_often_it_repeats():
 
 
 def test_level_up_still_raises_max_within_the_plausible_band():
-    s = Session()
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=2816, mp_max=2816)
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=2900, mp_max=3000)  # held
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=2900, mp_max=3000)  # corroborated
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=2800, mp_max=3000)
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2816, mp_max=2816, level=44)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2900, mp_max=3000, level=45)  # held
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2900, mp_max=3000, level=45)  # corroborated -- level bump halves the wait
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=2800, mp_max=3000, level=45)
     assert s.mp_loss == 100

@@ -24,6 +24,20 @@ class Settings:
     show_exp: bool = True
     show_exp_pct: bool = True
     show_eta: bool = True
+    show_proj_exp: bool = True
     topmost: bool = True
     scale_pct: int = 100
     language: Lang = "zh"
+    # Whether the timer rolling over finalizes+commits to History and then
+    # STOPS, vs. finalizing and immediately starting the next session (the
+    # only behaviour before this setting existed). Default on per user
+    # request -- see ~/.claude/notes/maplestory-analyzer/feature-plan-2026-08-23.md.
+    auto_stop: bool = True
+    # Whether the manual Restart button commits the in-progress session to
+    # History before discarding it. Governs Restart only -- auto_stop's
+    # timer-driven finalize always commits regardless of this. Default on
+    # per user request (2026-08-23, revised from the original off default):
+    # a restarted session's progress should be kept unless the user opts
+    # out, and per-entry deletion (see OverlayApp._on_delete_history_clicked)
+    # is the escape hatch for a throwaway entry now that one exists.
+    save_on_restart: bool = True
