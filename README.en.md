@@ -21,24 +21,42 @@ anything to the game.
 ## Features
 
 - **Live tracking** — LV/HP/MP/EXP update about twice a second, with a
-  progress bar for each. A status pill shows Tracking/Idle, and a countdown
-  chip shows how long is left in the current session.
+  progress bar for each. A status pill shows Calibrating/Tracking/Idle/
+  Paused/Stopped, and a countdown chip shows how long is left in the current
+  session. **The app opens Stopped and does not start tracking on launch** —
+  hit **Start** to begin a session; the first second or two shows
+  "Calibrating..." while it confirms the real max HP/MP and starting EXP
+  before counting anything.
+- **Pause/Resume** — pause the current session any time. LV/HP/MP/EXP keep
+  reading live while paused, but nothing is added to EXP gained or HP/MP
+  lost and the timer stops counting down; Resume picks back up from where
+  it left off, and whatever happened during the pause isn't counted.
 - **Sessions** — stats reset on a timer (default 10 minutes, adjustable) so
-  "EXP diff" always means "since this session started." Hit **Restart
-  Session** any time to end the current one early and start fresh.
+  "EXP diff" always means "since this session started." When the timer ends
+  it commits to History and stops by default (toggle off in Settings to go
+  back to immediately starting the next session instead). Hit **Restart
+  Session** any time to end the current one early — it saves to History by
+  default too (also toggleable).
 - **History** — every finished session becomes a card: start→end time, EXP
   gained (with %), HP/MP lost (approximate — see Troubleshooting). Newest
   session is always at the top. Click a card's title to give it a custom name
-  (e.g. "Ellinia Forest").
+  (e.g. "Ellinia Forest"), or the "×" in its top-right corner to delete it.
 - **Settings**:
   - **Window scale** — shrink or grow the whole window with a +/− stepper.
   - **Always on top** — toggle whether the HUD stays above the game.
   - **Language** — switch between 中文 and English any time, instantly.
   - **Session interval** — how often a session auto-resets (1–60 min).
-  - **Display toggles** — show/hide HP, MP, EXP, EXP%, and level-up ETA
-    individually.
+  - **Stop automatically when the timer ends** — on by default; turn off to
+    have the timer immediately start the next session instead (the old
+    behavior).
+  - **Save to History when restarting** — on by default; turn off to have
+    Restart discard the current session instead of saving it.
+  - **Display toggles** — show/hide HP, MP, EXP, EXP%, level-up ETA, and
+    estimated session EXP individually.
 - **Level-up ETA** — once a session has a few seconds of data, estimates
   time-to-next-level from your current EXP rate.
+- **Estimated session EXP** — projects "at this rate, the whole session will
+  end up earning about this much" from the current EXP rate.
 
 ## Requirements
 
@@ -110,7 +128,10 @@ identically whether started via the .exe or this command.
   the game's bottom-left LV/HP/MP/EXP strip. The app reads that area off the
   screen, so whatever is on top would be read instead of your stats — it stops
   and waits rather than recording nonsense. Move the window (or the HUD) off
-  that strip and tracking resumes within a couple of seconds.
+  that strip and tracking resumes within a couple of seconds. The countdown
+  timer keeps running the whole time it's covered, and still ends and
+  commits to History on schedule — it doesn't just stall because it can't
+  read the screen.
 - **The stat bar is hidden behind the Windows taskbar.** With the game
   maximised, the bottom stat strip can sit underneath the taskbar. Run the game
   windowed, or set the taskbar to auto-hide.
