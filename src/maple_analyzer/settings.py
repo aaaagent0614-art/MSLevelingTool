@@ -47,8 +47,5 @@ class Settings:
     # watch the inventory counter and record the session's net meso change.
     # The user opens the inventory once after Start and once before the
     # session ends; the first/last readings become the endpoints.
-    track_meso: bool = False
-    # Skip the stat-panel occlusion probe and OCR whatever is on screen at
-    # the panel's position (useful with magnifier overlays like Megapipe;
-    # may read garbage when genuinely covered). Meso capture is unaffected.
-    ignore_occlusion: bool = False
+    # Default on per user request (2026-08-24).
+    track_meso: bool = True

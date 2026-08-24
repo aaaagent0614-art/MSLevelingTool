@@ -49,7 +49,6 @@ from typing import Protocol
 import customtkinter as ctk
 from PIL import Image
 
-from .capture import PANEL_OBSCURED
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, find_meso_candidate, find_stat_fields, parse_fields
@@ -307,7 +306,7 @@ class OverlayApp:
 
     def _localize_error(self, message: str) -> str:
         """Translate the known capture.py RuntimeError messages (game
-        minimized / not found / stat panel covered) shown via _set_status_error --
+        minimized / not found) shown via _set_status_error --
         these are routine, expected states, not exceptional ones, so they
         deserve a real translation rather than leaking capture.py's raw
         English text into a zh-language UI. Anything unrecognized (a real
@@ -316,8 +315,6 @@ class OverlayApp:
             return self._t("status_error_minimized")
         if message.startswith("No window found with title containing"):
             return self._t("status_error_not_found")
-        if message == PANEL_OBSCURED:
-            return self._t("status_error_obscured")
         return message
 
     def _font(self, size: int, bold: bool = False) -> tuple:
@@ -647,9 +644,10 @@ class OverlayApp:
             command=self._on_save_on_restart_changed,
         ), "settings_save_on_restart", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 4))
 
-        # MESO: opt-in feature -- costs a full-frame grab + gold scan per
-        # tick, and needs the user to open the inventory at both session
-        # ends, so it stays off until asked for.
+        # MESO: found by the background locator's full-frame detection pass
+        # (the same one that locates the stat panel), so it costs nothing
+        # extra. Needs the user to open the inventory at both session ends
+        # to land the endpoint readings. Default on (2026-08-24).
         self._i18n(
             ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_track_meso", size=10, bold=True
         ).pack(fill="x", padx=12, pady=(3, 0))
@@ -664,17 +662,6 @@ class OverlayApp:
             ctk.CTkLabel(card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT),
             "settings_track_meso_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
-
-        self._ignore_occlusion_var = tk.BooleanVar(value=self._settings.ignore_occlusion)
-        self._i18n(ctk.CTkSwitch(
-            card, variable=self._ignore_occlusion_var, text_color=INK,
-            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
-            command=self._on_ignore_occlusion_changed,
-        ), "settings_ignore_occlusion", size=11, bold=False).pack(fill="x", padx=12, pady=0)
-        self._i18n(
-            ctk.CTkLabel(card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT),
-            "settings_ignore_occlusion_hint", size=9, bold=False,
-        ).pack(fill="x", padx=12, pady=(0, 4))
 
     # ---- settings callbacks ------------------------------------------------
 
@@ -723,14 +710,6 @@ class OverlayApp:
         # The live tab's Meso row is gated on this setting (see
         # _apply_visibility) -- show/hide it immediately.
         self._apply_visibility()
-
-    def _on_ignore_occlusion_changed(self) -> None:
-        """Flip the capture layer's occlusion probe. Guarded with getattr so
-        dev/demo stubs (which don't have a real GameWindowCapture) don't
-        crash the settings screen."""
-        self._settings.ignore_occlusion = self._ignore_occlusion_var.get()
-        if hasattr(self._source, "check_occlusion"):
-            setattr(self._source, "check_occlusion", not self._settings.ignore_occlusion)
 
     def _apply_visibility(self) -> None:
         s = self._settings

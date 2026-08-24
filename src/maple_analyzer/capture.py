@@ -4,8 +4,14 @@
 Two implementations:
 
 - `GameWindowCapture` (Windows only): finds the MapleStory window by title via
-  pywin32, reads its client rect, grabs that rect off screen with `mss`. This is
-  the real production path.
+  pywin32 and reads the window's OWN rendered frame with the Win32 PrintWindow
+  API (PW_RENDERFULLCONTENT). Reading the window's DWM backing store -- rather
+  than grabbing a screen *region* with mss -- is what makes the HUD immune to
+  other windows resting on top of the game, and to screen magnifiers like
+  Magpie. Magpie captures the game and renders a scaled copy into its own
+  window over the top; the game window underneath keeps its original client
+  size and keeps rendering, so PrintWindow reads the correct, unscaled frame
+  regardless of how the magnifier rescales what is on screen.
 - `StaticImageCapture` (any platform): replays a single image file every call.
   Used for dev/testing on machines without the game running (e.g. this repo's
   Linux dev environment) -- proves out the OCR/parse/rate/overlay code without
@@ -26,40 +32,11 @@ from PIL import Image
 from .regions import FIELD_BOXES, STAT_PANEL_BOX, scale_box
 
 
-# Raised (as a RuntimeError message) when another window sits over the stat
-# panel. Routine and recoverable, so it travels the same path as the
-# minimized/not-found states -- see overlay._do_tick and _localize_error.
-PANEL_OBSCURED = "stat panel is obscured"
-
-
-def field_sample_points(client_size: tuple[int, int]) -> list[tuple[int, int]]:
-    """Client-relative points to probe for occlusion: the four corners of each
-    FIELD_BOX, inset by a pixel so a corner lands inside its own box.
-
-    Sampling per *field* rather than the panel as a whole is deliberate. A
-    window clipping only the MP digits is the dangerous case -- the 'MP' label
-    stays readable so the value still parses, just wrong -- and a panel-level
-    check with a few points can miss it.
-    """
-    points: list[tuple[int, int]] = []
-    for box in FIELD_BOXES.values():
-        b = scale_box(box, client_size)
-        points += [
-            (b.left + 1, b.top + 1), (b.right - 2, b.top + 1),
-            (b.left + 1, b.bottom - 2), (b.right - 2, b.bottom - 2),
-        ]
-    return points
-
-
-def panel_is_obscured(sample_points, game_hwnd: int, window_at) -> bool:
-    """True if any sample point belongs to a window other than the game.
-
-    `window_at(x, y)` returns the *root* window at a screen point; injected so
-    this stays testable without a Win32 desktop. Any single covered point
-    counts -- there is no threshold, because partial coverage corrupts values
-    rather than merely hiding them.
-    """
-    return any(window_at(x, y) != game_hwnd for x, y in sample_points)
+# PrintWindow flags. PW_CLIENTONLY limits the render to the client area;
+# PW_RENDERFULLCONTENT asks DWM for the window's own composited frame, which
+# is the whole point -- it ignores whatever window sits on top of the game.
+PW_CLIENTONLY = 0x00000001
+PW_RENDERFULLCONTENT = 0x00000002
 
 
 class WindowCapture(Protocol):
@@ -98,35 +75,27 @@ class StaticImageCapture:
 
 
 class GameWindowCapture:
-    """Real capture: locates the game window by title and grabs its client area."""
+    """Real capture: locates the game window by title and reads its own
+    rendered frame via PrintWindow(PW_RENDERFULLCONTENT)."""
 
     def __init__(self, title_substring: str = "新楓之谷", process_name: str = "Maplestory"):
         if sys.platform != "win32":
             raise RuntimeError("GameWindowCapture requires Windows (pywin32 + real desktop)")
-        import mss
         import win32api
         import win32con
         import win32gui
         import win32process
+        import win32ui
 
         self._win32gui = win32gui
         self._win32process = win32process
         self._win32api = win32api
         self._win32con = win32con
-        self._mss = mss.mss()
+        self._win32ui = win32ui
         self._title_substring = title_substring
         self._process_name = process_name.lower()
         self._hwnd: int | None = None
-        # Whether grab_fields refuses frames whose stat panel is covered by
-        # another window (see panel_is_obscured). Off by default; the
-        # overlay can flip it (Settings -> ignore occlusion) to keep reading
-        # whatever is on screen -- useful with magnifier overlays, with the
-        # caveat that covered pixels are the covering window's, so OCR may
-        # read garbage. Meso capture (grab_meso) is never affected: it runs
-        # its own scan and the whole point is that the inventory covers the
-        # panel.
-        self.check_occlusion: bool = True
-        # Last client size seen by grab_fields, for the overlay to log. Every
+        # Last client size seen by a grab, for the overlay to log. Every
         # crop in regions.py is scaled from this, so it is the single most
         # useful number when diagnosing a bad read from a log after the fact
         # -- and the one thing missing from every capture taken so far.
@@ -179,72 +148,88 @@ class GameWindowCapture:
         self._hwnd = found[0]
         return self._hwnd
 
-    def _client_rect_on_screen(self) -> tuple[int, int, int, int]:
+    def _window_geometry(self) -> tuple[int, int, int]:
         hwnd = self._find_window()
         if self._win32gui.IsIconic(hwnd):
-            # Minimized windows report a client rect around (-32000, -32000)
-            # with zero size -- mss.grab() throws a raw ScreenShotError on
-            # that instead of anything actionable. Fail clearly here so
-            # callers (the overlay) can show 'game minimized' and retry,
+            # Minimized windows report a zero-size client rect -- fail clearly
+            # here so callers (the overlay) can show 'game minimized' and retry,
             # same as the 'game not found' case.
             raise RuntimeError("game window is minimized")
-        left, top, right, bottom = self._win32gui.GetClientRect(hwnd)
-        left, top = self._win32gui.ClientToScreen(hwnd, (left, top))
-        right, bottom = self._win32gui.ClientToScreen(hwnd, (right, bottom))
-        return left, top, right, bottom
+        _, _, right, bottom = self._win32gui.GetClientRect(hwnd)
+        if right <= 0 or bottom <= 0:
+            raise RuntimeError("game window is minimized")
+        return hwnd, right, bottom
+
+    def _print_window(self, hwnd: int, cw: int, ch: int) -> Image.Image | None:
+        """Render the window's own client area into a bitmap.
+
+        Returns None when the window won't composite (PrintWindow reports 0, or
+        the result is entirely black -- typical for exclusive-fullscreen D3D),
+        so callers can fall back to an mss screen grab.
+        """
+        hwnd_dc = self._win32gui.GetWindowDC(hwnd)
+        mfc_dc = self._win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bmp = self._win32ui.CreateBitmap()
+        bmp.CreateCompatibleBitmap(mfc_dc, cw, ch)
+        save_dc.SelectObject(bmp)
+        try:
+            ok = self._win32gui.PrintWindow(
+                hwnd, save_dc.GetSafeHdc(), PW_CLIENTONLY | PW_RENDERFULLCONTENT
+            )
+        finally:
+            self._win32gui.DeleteObject(bmp.GetHandle())
+            save_dc.DeleteDC()
+            mfc_dc.DeleteDC()
+            self._win32gui.ReleaseDC(hwnd, hwnd_dc)
+        if not ok:
+            return None
+        info = bmp.GetInfo()
+        bits = bmp.GetBitmapBits(True)
+        img = Image.frombytes("RGB", (info["bmWidth"], info["bmHeight"]), bits, "raw", "BGRX", 0, 1)
+        # getbbox() is None exactly when every pixel is black -- the signal
+        # that DWM didn't hand us the window's content.
+        return img if img.getbbox() is not None else None
+
+    def _screen_fallback(self) -> Image.Image:
+        """mss screen-region grab, used only when PrintWindow can't composite
+        the window. NOT occlusion-proof -- it reads whatever is on screen at
+        the window's position, same as the pre-PrintWindow behaviour."""
+        import mss
+
+        hwnd = self._find_window()
+        if self._win32gui.IsIconic(hwnd):
+            raise RuntimeError("game window is minimized")
+        left, top = self._win32gui.ClientToScreen(hwnd, (0, 0))
+        _, _, right, bottom = self._win32gui.GetClientRect(hwnd)
+        shot = mss.mss().grab({"left": left, "top": top, "width": right, "height": bottom})
+        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
     def grab_full(self) -> Image.Image:
-        left, top, right, bottom = self._client_rect_on_screen()
-        shot = self._mss.grab({"left": left, "top": top, "width": right - left, "height": bottom - top})
-        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        hwnd, cw, ch = self._window_geometry()
+        img = self._print_window(hwnd, cw, ch)
+        if img is None:
+            img = self._screen_fallback()
+        self.client_size = img.size
+        return img
 
     def grab_panel(self) -> Image.Image:
-        left, top, right, bottom = self._client_rect_on_screen()
-        client_size = (right - left, bottom - top)
-        box = scale_box(STAT_PANEL_BOX, client_size)
-        shot = self._mss.grab({
-            "left": left + box.left,
-            "top": top + box.top,
-            "width": box.right - box.left,
-            "height": box.bottom - box.top,
-        })
-        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-
-    def _root_window_at(self, x: int, y: int) -> int:
-        # GA_ROOT (2) resolves a child window/control to its top-level owner,
-        # so the game's own children don't read as something covering it.
-        return self._win32gui.GetAncestor(self._win32gui.WindowFromPoint((x, y)), 2)
+        frame = self.grab_full()
+        box = scale_box(STAT_PANEL_BOX, frame.size)
+        return frame.crop(box.as_tuple())
 
     def grab_fields(self) -> dict[str, Image.Image]:
-        # One screen grab covering the whole panel (mss itself is cheap, ~3.5ms
-        # measured -- see VERSIONS.md/overlay.py timing notes), then slice each
-        # field out of that single in-memory image rather than four separate
-        # mss.grab() calls.
-        left, top, right, bottom = self._client_rect_on_screen()
-        client_size = (right - left, bottom - top)
-        self.client_size = client_size
-
-        # mss grabs the screen *region* where the panel sits, not the game's
-        # own pixels, so anything on top of it is what would reach OCR. Refuse
-        # the frame instead of reading someone else's window (~0.03ms measured
-        # for the whole check, against ~60ms of OCR) -- unless the user opted
-        # out via Settings (ignore occlusion), which reads whatever is there.
-        points = [(left + x, top + y) for x, y in field_sample_points(client_size)]
-        if self.check_occlusion and panel_is_obscured(points, self._hwnd, self._root_window_at):
-            raise RuntimeError(PANEL_OBSCURED)
-
-        panel_box = scale_box(STAT_PANEL_BOX, client_size)
-        shot = self._mss.grab({
-            "left": left + panel_box.left,
-            "top": top + panel_box.top,
-            "width": panel_box.right - panel_box.left,
-            "height": panel_box.bottom - panel_box.top,
-        })
-        panel = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        # One full-frame grab, then slice each field out of that single
+        # in-memory image rather than a grab per field. PrintWindow captures
+        # the whole window anyway, so this is also one PrintWindow call
+        # instead of four.
+        frame = self.grab_full()
+        panel_box = scale_box(STAT_PANEL_BOX, frame.size)
+        panel = frame.crop(panel_box.as_tuple())
 
         fields = {}
         for name, box in FIELD_BOXES.items():
-            field_box = scale_box(box, client_size)
+            field_box = scale_box(box, frame.size)
             local = (
                 field_box.left - panel_box.left, field_box.top - panel_box.top,
                 field_box.right - panel_box.left, field_box.bottom - panel_box.top,

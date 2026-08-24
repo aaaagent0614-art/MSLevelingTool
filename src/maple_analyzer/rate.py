@@ -300,8 +300,8 @@ class Session:
     This is NOT a claim that 3 static ticks of well-formed-but-wrong data can
     never calibrate -- nothing at this layer has ground truth to check a
     number against in isolation, that's what parser.py's structural filters
-    (a missing '[' etc.) and capture.py's PANEL_OBSCURED occlusion probe are
-    for, upstream of this. What calibration actually protects against, and
+    (a missing '[' etc.) are for, upstream of this. What calibration actually
+    protects against, and
     is tested against real captured frames for
     (test_calibration_locks_onto_the_truth_before_real_garbage_arrives): a
     single bad frame arriving among otherwise-good ones, and a bad max

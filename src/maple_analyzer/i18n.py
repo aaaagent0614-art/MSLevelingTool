@@ -33,7 +33,6 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     # rather than showing capture.py's raw English exception text.
     "status_error_minimized": {"en": "Game window minimized", "zh": "遊戲視窗已最小化"},
     "status_error_not_found": {"en": "Game window not found", "zh": "找不到遊戲視窗"},
-    "status_error_obscured": {"en": "Stat panel is covered", "zh": "狀態列被其他視窗遮擋"},
     # Fallback for anything NOT recognized above -- an actual bug, not a
     # known game-window state, so {detail} (the raw exception text) stays in
     # English rather than pretending to translate arbitrary Python errors.
@@ -96,13 +95,6 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "settings_track_meso_hint": {
         "en": "Open the inventory (I) once right after Start and once before the session ends; the meso counter is read both times.",
         "zh": "開始記錄後與結束前，各開一次道具欄（I），程式會讀取楓幣數字。",
-    },
-    "settings_ignore_occlusion": {
-        "en": "Keep reading when covered by other windows", "zh": "被其他視窗遮擋時仍繼續讀取",
-    },
-    "settings_ignore_occlusion_hint": {
-        "en": "Reads whatever is on screen at the stat panel position. May read wrong values when genuinely covered.",
-        "zh": "直接讀取狀態列位置當前的畫面。真的被擋住時可能讀到錯誤數值。",
     },
 
     "unit_min": {"en": "min", "zh": "分鐘"},
