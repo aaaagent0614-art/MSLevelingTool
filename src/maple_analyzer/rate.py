@@ -51,6 +51,15 @@ class SessionSummary:
     # a session spans one, since the game's counter resets to ~0. None only for
     # summaries built before this existed, which fall back to the subtraction.
     exp_gained: int | None = None
+    # Meso delta over the session, from the gold inventory counter (see
+    # capture.find_meso_crop). Both endpoints are real OCR readings: the
+    # first valid meso value seen after the session started, and the last
+    # one seen before it finalized. None when the inventory was never
+    # opened (or track_meso was off) during the session. Signed: buying
+    # potions/items shows up as a negative delta, which is correct data.
+    start_meso: int | None = None
+    end_meso: int | None = None
+    meso_gained: int | None = None
     # User-assigned label, e.g. "grinding spot A". None until renamed via the
     # History tab -- UI-layer concern only, the engine never sets this.
     name: str | None = None
@@ -73,6 +82,18 @@ class SessionSummary:
     @property
     def duration_s(self) -> float:
         return self.end_time - self.start_time
+
+    @property
+    def exp_per_min(self) -> float | None:
+        """Efficiency metric: EXP gained per minute of session time. None
+        when no EXP data was captured."""
+        diff = self.exp_diff
+        if diff is None:
+            return None
+        dur = self.duration_s
+        if dur <= 0:
+            return None
+        return diff / dur * 60
 
 
 class _LossTracker:
@@ -340,6 +361,14 @@ class Session:
         self._paused_total = 0.0
         self._resume_pending = False
 
+        # Meso tracking (see record_meso). Deliberately NOT part of
+        # calibration: the meso counter only exists while the inventory is
+        # open, which also obscures the stat panel -- so meso readings
+        # arrive on a completely different schedule from HP/MP/EXP and
+        # can't be corroborated tick-by-tick the same way.
+        self._start_meso: int | None = None
+        self._end_meso: int | None = None
+
     def start(self, now: float | None = None) -> None:
         """Begin a new session. Carries forward whatever EXP/HP/MP values are
         already known as the new baseline (so a level-up-triggered or
@@ -361,6 +390,11 @@ class Session:
         self._pause_started_at = None
         self._paused_total = 0.0
         self._resume_pending = False
+        # A fresh session starts with no meso endpoints -- the user opens
+        # the inventory after Start to establish the baseline (see
+        # record_meso's docstring).
+        self._start_meso = None
+        self._end_meso = None
 
     # ---- pause/resume -------------------------------------------------
 
@@ -664,6 +698,40 @@ class Session:
             return None
         return max(0, self._banked + (self._exp_cur - self._segment_start))
 
+    def record_meso(self, meso: int) -> None:
+        """Feed one meso counter reading into the session.
+
+        The inventory counter is the only reliable meso source, and it only
+        exists while the inventory window is open (which also obscures the
+        stat panel -- see capture.find_meso_crop). So unlike HP/MP/EXP there
+        is no continuous stream to filter: the user opens the inventory once
+        after Start and once before the session ends, and each valid reading
+        becomes the corresponding endpoint. First reading after start =
+        baseline, every later reading keeps updating the end value, so the
+        last reading before finalize is the end point.
+
+        No-op while paused or before the session has actually started
+        (elapsed() needs a real start to anchor a baseline to)."""
+        if self._paused or self._start_time is None:
+            return
+        if self._start_meso is None:
+            # First reading of the session is the baseline only -- setting
+            # end here too would make a single inventory opening report a
+            # misleading "+0" instead of "no end reading yet".
+            self._start_meso = meso
+            self._end_meso = None
+        else:
+            self._end_meso = meso
+
+    @property
+    def meso_gained(self) -> int | None:
+        """Net meso change over the session (end - start). None until BOTH
+        endpoints exist -- one inventory opening isn't enough to diff
+        against. Signed: spending (potions, items) shows as negative."""
+        if self._start_meso is None or self._end_meso is None:
+            return None
+        return self._end_meso - self._start_meso
+
     @property
     def hp_loss(self) -> int:
         return self._hp.loss
@@ -700,4 +768,7 @@ class Session:
             total_exp=self._total_exp,
             interval_minutes=interval_minutes,
             exp_gained=self.exp_diff,
+            start_meso=self._start_meso,
+            end_meso=self._end_meso,
+            meso_gained=self.meso_gained,
         )

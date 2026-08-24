@@ -1,6 +1,8 @@
 """Session/SessionSummary tests -- pure logic, no OCR/images."""
 import dataclasses
 
+import pytest
+
 from maple_analyzer.rate import Session
 
 
@@ -194,3 +196,95 @@ def test_level_up_still_raises_max_within_the_plausible_band():
     s.record(exp_cur=1000, hp_cur=500, mp_cur=2900, mp_max=3000, level=45)  # corroborated -- level bump halves the wait
     s.record(exp_cur=1000, hp_cur=500, mp_cur=2800, mp_max=3000, level=45)
     assert s.mp_loss == 100
+
+
+# ---- meso tracking ------------------------------------------------------
+
+def test_meso_requires_both_endpoints():
+    """One inventory opening (start only) isn't enough to diff against."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    assert s.meso_gained is None
+
+
+def test_meso_gain_is_end_minus_start():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_250_000)  # inventory re-opened later
+    assert s.meso_gained == 250_000
+
+
+def test_meso_negative_when_spending():
+    """Buying potions/items mid-session shows as a negative delta."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(2_000_000)
+    s.record_meso(1_750_000)
+    assert s.meso_gained == -250_000
+
+
+def test_meso_latest_reading_wins_as_endpoint():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_100_000)
+    s.record_meso(1_200_000)
+    assert s.meso_gained == 200_000
+
+
+def test_meso_ignored_before_start_and_while_paused():
+    s = Session(require_calibration=False)
+    s.record_meso(9_000_000)  # session never started -- ignored
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)  # baseline only, no end yet
+    s.pause()
+    s.record_meso(5_000_000)  # paused -- ignored
+    assert s.meso_gained is None  # never got an end reading
+
+
+def test_meso_reset_on_new_session():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_250_000)
+    s.start()  # timer rollover / manual restart
+    s.record_meso(9_000_000)
+    assert s.meso_gained is None  # fresh baseline, no end yet
+
+
+def test_finalize_records_meso_fields():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_250_000)
+    summary = s.finalize(10)
+    assert summary.start_meso == 1_000_000
+    assert summary.end_meso == 1_250_000
+    assert summary.meso_gained == 250_000
+
+
+def test_finalize_without_meso_keeps_fields_none():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    summary = s.finalize(10)
+    assert summary.meso_gained is None
+    assert summary.start_meso is None and summary.end_meso is None
+
+
+def test_exp_per_min():
+    s = Session(require_calibration=False)
+    s.start(now=1000.0)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record(exp_cur=2000, hp_cur=500, mp_cur=200)
+    summary = s.finalize(10, now=1060.0)
+    assert summary.duration_s == 60
+    assert summary.exp_per_min == pytest.approx(1000.0)
+
+
+def test_exp_per_min_none_without_exp():
+    s = Session(require_calibration=False)
+    s.start(now=1000.0)
+    s.record(exp_cur=None, hp_cur=500, mp_cur=200)
+    assert s.finalize(10, now=1060.0).exp_per_min is None

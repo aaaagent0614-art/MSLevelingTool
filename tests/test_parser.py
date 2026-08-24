@@ -1,7 +1,7 @@
 """Pure regex/normalization tests for parser.py -- no OCR, no images. Covers
 the field text -> StatSnapshot logic and the OCR-noise cases documented in
 parser.py's module docstring (dropped '.', dropped ']', space-for-dot)."""
-from maple_analyzer.parser import parse_fields
+from maple_analyzer.parser import parse_fields, parse_meso
 
 
 def test_clean_fields():
@@ -84,3 +84,39 @@ def test_exp_pct_separator_read_as_colon():
     snap = parse_fields({"EXP": "EXP 321675[75:11%] "})
     assert snap.exp_cur == 321675
     assert snap.exp_pct == 75.11
+
+
+# ---- parse_meso ---------------------------------------------------------
+
+def test_meso_clean_commas():
+    assert parse_meso("1,234,567") == 1234567
+
+
+def test_meso_no_commas():
+    assert parse_meso("1234567") == 1234567
+
+
+def test_meso_mangled_commas():
+    """OCR drops commas irregularly -- any digit/comma run is fine."""
+    assert parse_meso("1,234567") == 1234567
+
+
+def test_meso_small_value():
+    assert parse_meso("850") == 850
+
+
+def test_meso_empty_or_garbage_is_none():
+    assert parse_meso("") is None
+    assert parse_meso(None) is None
+    assert parse_meso("楓幣") is None
+    assert parse_meso("???") is None
+
+
+def test_meso_absurd_value_rejected():
+    """Beyond a quadrillion is OCR garbage (a stray digit run from other
+    gold text), not a real counter."""
+    assert parse_meso("99999999999999999999") is None
+
+
+def test_meso_picks_first_digit_run():
+    assert parse_meso("abc 12,345 def") == 12345

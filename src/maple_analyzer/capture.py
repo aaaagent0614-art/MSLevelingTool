@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
 from PIL import Image
 
 from .regions import FIELD_BOXES, STAT_PANEL_BOX, scale_box
@@ -30,6 +31,101 @@ from .regions import FIELD_BOXES, STAT_PANEL_BOX, scale_box
 # panel. Routine and recoverable, so it travels the same path as the
 # minimized/not-found states -- see overlay._do_tick and _localize_error.
 PANEL_OBSCURED = "stat panel is obscured"
+
+# ---- meso counter detection ---------------------------------------------
+#
+# The meso counter only exists while the inventory is open, and the classic
+# inventory is a draggable window -- a fixed pixel box (the FIELD_BOXES
+# approach) can't find it. What IS stable is its appearance: the counter is
+# bright gold digits on the dark inventory background, the only persistent
+# gold text of that size in the classic UI (item names are white/blue/purple,
+# the coin icon is a filled blob, not text). So we scan the whole frame for
+# gold text-shaped blobs and OCR the widest one. None when the inventory is
+# closed (no gold text on screen at all).
+
+# "Gold" here: strong red + green, weak blue. Tuned against the sample
+# client screenshots (bottom panel chat text reads white, the LV/HP/MP/EXP
+# strip is white-on-dark, so nothing there matches).
+GOLD_MIN_R = 140
+GOLD_MIN_G = 100
+GOLD_MAX_B = 130
+# A meso amount is a *row* of digit glyphs -- wide and short. The coin icon
+# is a single roughly-square blob. Individual digit components are grouped
+# into rows first, then the row's overall aspect ratio is checked (each
+# digit alone is ~0.7-0.8 wide/tall, so per-component aspect would reject
+# every one of them -- see the component stats in test_meso.py's synthetic
+# frame debug). 1.5 catches 3-digit amounts while still excluding the
+# square coin icon and gold monster-name tags (transient, small).
+MESO_MIN_HEIGHT = 8
+MESO_MIN_ASPECT = 1.5
+MESO_MIN_FILL = 0.12  # strokes are thin -- a filled blob is not text
+MESO_PAD = 4
+
+
+def find_meso_crop(frame: Image.Image) -> Image.Image | None:
+    """Locate the gold meso counter in a full client frame and return a tight
+    crop around it (PIL image, ready for recognition-only OCR). None when no
+    gold text-shaped blob is visible -- i.e. the inventory is closed.
+
+    Digit glyphs come out of connected-components as separate blobs (each
+    digit its own component, aspect ~0.7), so the text check happens per
+    *row*: components whose vertical spans overlap are grouped into a line,
+    and the line must be wide relative to its height."""
+    arr = np.asarray(frame.convert("RGB"))
+    mask = (
+        (arr[..., 0] >= GOLD_MIN_R)
+        & (arr[..., 1] >= GOLD_MIN_G)
+        & (arr[..., 2] <= GOLD_MAX_B)
+    ).astype(np.uint8)
+    if not mask.any():
+        return None
+
+    import cv2  # opencv-python-headless is a hard dep; import lazily to keep import cost off the hot path
+
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    comps: list[tuple[int, int, int, int]] = []
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if h >= MESO_MIN_HEIGHT and area >= w * h * MESO_MIN_FILL:
+            comps.append((int(x), int(y), int(w), int(h)))
+    if not comps:
+        return None
+
+    # Group into rows by vertical-span overlap (sorted top-to-bottom so a
+    # component joins the first row it touches).
+    comps.sort(key=lambda c: (c[1], c[0]))
+    rows: list[list[tuple[int, int, int, int]]] = []
+    for c in comps:
+        for row in rows:
+            ry0 = min(cc[1] for cc in row)
+            ry1 = max(cc[1] + cc[3] for cc in row)
+            if c[1] < ry1 and c[1] + c[3] > ry0:
+                row.append(c)
+                break
+        else:
+            rows.append([c])
+
+    best: tuple[int, int, int, int] | None = None
+    best_w = 0
+    for row in rows:
+        x0 = min(c[0] for c in row)
+        x1 = max(c[0] + c[2] for c in row)
+        y0 = min(c[1] for c in row)
+        y1 = max(c[1] + c[3] for c in row)
+        rw, rh = x1 - x0, y1 - y0
+        if rh <= 0 or rw < rh * MESO_MIN_ASPECT:
+            continue  # square-ish blob (coin icon) or a stray small tag
+        if rw > best_w:
+            best = (x0, y0, rw, rh)
+            best_w = rw
+    if best is None:
+        return None
+    x, y, w, h = best
+    box = (
+        max(0, x - MESO_PAD), max(0, y - MESO_PAD),
+        min(frame.width, x + w + MESO_PAD), min(frame.height, y + h + MESO_PAD),
+    )
+    return frame.crop(box)
 
 
 def field_sample_points(client_size: tuple[int, int]) -> list[tuple[int, int]]:
@@ -76,6 +172,13 @@ class WindowCapture(Protocol):
         recognition-only OCR -- see ocr.py's read_field()."""
         ...
 
+    def grab_meso(self) -> Image.Image | None:
+        """Crop around the gold meso counter (inventory open), or None when
+        no gold text is visible. Independent of the stat-panel occlusion
+        probe -- opening the inventory obscures the panel AND is exactly
+        when meso becomes readable."""
+        ...
+
 
 class StaticImageCapture:
     """Dev/demo stand-in: always returns (a copy of) one image from disk."""
@@ -95,6 +198,9 @@ class StaticImageCapture:
             name: self._image.crop(scale_box(box, self._image.size).as_tuple())
             for name, box in FIELD_BOXES.items()
         }
+
+    def grab_meso(self) -> Image.Image | None:
+        return find_meso_crop(self._image)
 
 
 class GameWindowCapture:
@@ -117,6 +223,15 @@ class GameWindowCapture:
         self._title_substring = title_substring
         self._process_name = process_name.lower()
         self._hwnd: int | None = None
+        # Whether grab_fields refuses frames whose stat panel is covered by
+        # another window (see panel_is_obscured). Off by default; the
+        # overlay can flip it (Settings -> ignore occlusion) to keep reading
+        # whatever is on screen -- useful with magnifier overlays, with the
+        # caveat that covered pixels are the covering window's, so OCR may
+        # read garbage. Meso capture (grab_meso) is never affected: it runs
+        # its own scan and the whole point is that the inventory covers the
+        # panel.
+        self.check_occlusion: bool = True
         # Last client size seen by grab_fields, for the overlay to log. Every
         # crop in regions.py is scaled from this, so it is the single most
         # useful number when diagnosing a bad read from a log after the fact
@@ -218,9 +333,10 @@ class GameWindowCapture:
         # mss grabs the screen *region* where the panel sits, not the game's
         # own pixels, so anything on top of it is what would reach OCR. Refuse
         # the frame instead of reading someone else's window (~0.03ms measured
-        # for the whole check, against ~60ms of OCR).
+        # for the whole check, against ~60ms of OCR) -- unless the user opted
+        # out via Settings (ignore occlusion), which reads whatever is there.
         points = [(left + x, top + y) for x, y in field_sample_points(client_size)]
-        if panel_is_obscured(points, self._hwnd, self._root_window_at):
+        if self.check_occlusion and panel_is_obscured(points, self._hwnd, self._root_window_at):
             raise RuntimeError(PANEL_OBSCURED)
 
         panel_box = scale_box(STAT_PANEL_BOX, client_size)
@@ -241,6 +357,19 @@ class GameWindowCapture:
             )
             fields[name] = panel.crop(local)
         return fields
+
+    def grab_meso(self) -> Image.Image | None:
+        """Full client-area grab, then the gold-text scan (find_meso_crop).
+
+        Deliberately skips the panel_is_obscured probe: the inventory
+        window covers the stat panel whenever meso is readable, so gating
+        meso on the panel being clear would make it permanently unreadable."""
+        left, top, right, bottom = self._client_rect_on_screen()
+        shot = self._mss.grab({
+            "left": left, "top": top, "width": right - left, "height": bottom - top,
+        })
+        frame = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        return find_meso_crop(frame)
 
 
 def get_capture(sample_path: str | Path | None = None) -> WindowCapture:

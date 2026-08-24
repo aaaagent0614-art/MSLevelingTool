@@ -46,11 +46,12 @@ from tkinter import messagebox, simpledialog
 from typing import Protocol
 
 import customtkinter as ctk
+from PIL import Image
 
 from .capture import PANEL_OBSCURED
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
-from .parser import StatSnapshot, parse_fields
+from .parser import StatSnapshot, parse_fields, parse_meso
 from .rate import Session, SessionSummary
 from .settings import Settings
 
@@ -147,6 +148,9 @@ class PanelSource(Protocol):
     def grab_fields(self) -> dict:
         ...
 
+    def grab_meso(self) -> Image.Image | None:
+        ...
+
 
 def _fmt_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
@@ -173,10 +177,12 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
         dur_s = f"{dur_min:.1f}m of {s.interval_minutes:.0f}m, restarted early"
     else:
         dur_s = f"{dur_min:.1f}m"
+    meso_s = f"{s.meso_gained:+,}" if s.meso_gained is not None else "?"
     return (
         f"#{index} ({dur_s}): "
         f"EXP {start_s} -> {end_s} ({diff_s}{pct_s})  "
-        f"HP {_fmt_loss(s.hp_loss)}  MP {_fmt_loss(s.mp_loss)}"
+        f"HP {_fmt_loss(s.hp_loss)}  MP {_fmt_loss(s.mp_loss)}  "
+        f"Meso {meso_s}"
     )
 
 
@@ -233,7 +239,14 @@ class OverlayApp:
         self.root.configure(fg_color=BG)
         self.root.geometry("260x420+40+40")
 
-        self._tabview = ctk.CTkTabview(self.root, fg_color=BG, segmented_button_fg_color=SURFACE)
+        # segmented_button_font is deliberately set to the same chrome font
+        # as the rest of the UI: without it, CTkTabview falls back to
+        # customtkinter's default font (Roboto, which isn't installed on
+        # Windows and renders the tab labels in a mismatched fallback).
+        self._tabview = ctk.CTkTabview(
+            self.root, fg_color=BG, segmented_button_fg_color=SURFACE,
+            segmented_button_font=self._font(13, bold=True),
+        )
         self._tabview.pack(fill="both", expand=True, padx=8, pady=8)
         # CTkTabview's tab name doubles as its segmented-button label and its
         # internal dict key -- there's no separate "id" to address a tab by,
@@ -314,6 +327,11 @@ class OverlayApp:
             if new_name != old_name:
                 self._tabview.rename(old_name, new_name)
                 self._tab_names[logical] = new_name
+
+        # Tab labels are translated text, so they follow the language font
+        # like every other chrome label (see the construction-site comment
+        # on _tabview for why this matters).
+        self._tabview.configure(segmented_button_font=self._font(13, bold=True))
 
         for widget, key, size, bold in self._i18n_labels:
             widget.configure(text=self._t(key), font=self._font(size, bold))
@@ -425,6 +443,9 @@ class OverlayApp:
         add_kv_row(3, "projexp", "kv_proj_exp")
         add_kv_row(4, "hploss", "kv_hp_loss")
         add_kv_row(5, "mploss", "kv_mp_loss")
+        # Meso row always exists; it just shows '--' until track_meso is on
+        # AND both inventory readings have landed (see Session.record_meso).
+        add_kv_row(6, "mesodiff", "kv_meso_diff")
 
         # Two buttons share one row: the left one cycles Pause/Resume/Start
         # depending on _run_state (see _on_pause_button_clicked), the right
@@ -580,6 +601,35 @@ class OverlayApp:
             command=self._on_save_on_restart_changed,
         ), "settings_save_on_restart", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 4))
 
+        # MESO: opt-in feature -- costs a full-frame grab + gold scan per
+        # tick, and needs the user to open the inventory at both session
+        # ends, so it stays off until asked for.
+        self._i18n(
+            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_track_meso", size=10, bold=True
+        ).pack(fill="x", padx=12, pady=(3, 0))
+
+        self._track_meso_var = tk.BooleanVar(value=self._settings.track_meso)
+        self._i18n(ctk.CTkSwitch(
+            card, variable=self._track_meso_var, text_color=INK,
+            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
+            command=self._on_track_meso_changed,
+        ), "settings_track_meso", size=11, bold=False).pack(fill="x", padx=12, pady=0)
+        self._i18n(
+            ctk.CTkLabel(card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT),
+            "settings_track_meso_hint", size=9, bold=False,
+        ).pack(fill="x", padx=12, pady=(0, 3))
+
+        self._ignore_occlusion_var = tk.BooleanVar(value=self._settings.ignore_occlusion)
+        self._i18n(ctk.CTkSwitch(
+            card, variable=self._ignore_occlusion_var, text_color=INK,
+            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
+            command=self._on_ignore_occlusion_changed,
+        ), "settings_ignore_occlusion", size=11, bold=False).pack(fill="x", padx=12, pady=0)
+        self._i18n(
+            ctk.CTkLabel(card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT),
+            "settings_ignore_occlusion_hint", size=9, bold=False,
+        ).pack(fill="x", padx=12, pady=(0, 4))
+
     # ---- settings callbacks ------------------------------------------------
 
     def _on_scale_step(self, delta: int) -> None:
@@ -622,6 +672,20 @@ class OverlayApp:
     def _on_save_on_restart_changed(self) -> None:
         self._settings.save_on_restart = self._save_on_restart_var.get()
 
+    def _on_track_meso_changed(self) -> None:
+        self._settings.track_meso = self._track_meso_var.get()
+        # The live tab's Meso row is gated on this setting (see
+        # _apply_visibility) -- show/hide it immediately.
+        self._apply_visibility()
+
+    def _on_ignore_occlusion_changed(self) -> None:
+        """Flip the capture layer's occlusion probe. Guarded with getattr so
+        dev/demo stubs (which don't have a real GameWindowCapture) don't
+        crash the settings screen."""
+        self._settings.ignore_occlusion = self._ignore_occlusion_var.get()
+        if hasattr(self._source, "check_occlusion"):
+            setattr(self._source, "check_occlusion", not self._settings.ignore_occlusion)
+
     def _apply_visibility(self) -> None:
         s = self._settings
         visible_stats = {"level": True, "hp": s.show_hp, "mp": s.show_mp, "exp": s.show_exp}
@@ -633,6 +697,7 @@ class OverlayApp:
         visible_kv = {
             "startexp": True, "expdiff": True, "eta": s.show_eta,
             "projexp": s.show_proj_exp, "hploss": s.show_hp, "mploss": s.show_mp,
+            "mesodiff": s.track_meso,
         }
         for key, (lbl, value) in self._kv_rows.items():
             for w in (lbl, value):
@@ -676,6 +741,16 @@ class OverlayApp:
 
     def _do_tick(self) -> int:
         t0 = time.perf_counter()
+
+        # Meso first, and independent of the stat-panel path: opening the
+        # inventory (the only time meso is readable) obscures the stat
+        # panel, so gating meso on a successful panel grab would make it
+        # permanently unreadable. Its own failures are silent -- no gold
+        # text on screen is the normal "inventory closed" state, not an
+        # error worth surfacing.
+        if self._settings.track_meso:
+            self._try_read_meso()
+
         try:
             field_images = self._source.grab_fields()
         except RuntimeError as e:
@@ -759,6 +834,29 @@ class OverlayApp:
         self._render(merged)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         return max(0, int(TARGET_MS - elapsed_ms))
+
+    def _try_read_meso(self) -> None:
+        """One meso counter read attempt (called from _do_tick when
+        track_meso is on): grab the gold-text crop, OCR it, feed any
+        plausible number to the session.
+
+        Silent on every failure mode -- no gold text on screen (inventory
+        closed) is the normal state, and a capture/OCR hiccup here shouldn't
+        take down the tick or spam the log the way stat-panel errors do."""
+        try:
+            crop = self._source.grab_meso()
+        except Exception:
+            return
+        if crop is None:
+            return
+        try:
+            meso = parse_meso(self._ocr.read_field(crop))
+        except Exception:
+            return
+        if meso is None:
+            return
+        if self._run_state == "running":
+            self._session.record_meso(meso)
 
     def _update_timer_label(self) -> None:
         """Split out of _render so the capture-error path in _do_tick can
@@ -954,10 +1052,18 @@ class OverlayApp:
         ctk.CTkLabel(rng, text=f"  {diff_s}", font=_FONT_MONO, text_color=EXP_COLOR).pack(side="left")
         if pct_diff is not None:
             ctk.CTkLabel(rng, text=f" (+{pct_diff:.2f}%)", font=_FONT_MONO_SM, text_color=INK_DIM).pack(side="left")
+        # Efficiency: EXP per minute of session time, in the same muted
+        # style as the percentage -- the headline number stays the diff.
+        epm = summary.exp_per_min
+        if epm is not None:
+            ctk.CTkLabel(
+                rng, text=f"  {epm:,.0f}/{self._t('unit_min_short')}",
+                font=_FONT_MONO_SM, text_color=INK_DIM,
+            ).pack(side="left")
 
         mini = ctk.CTkFrame(card, fg_color="transparent")
         mini.pack(fill="x", padx=12, pady=(0, 10))
-        mini.grid_columnconfigure((0, 1), weight=1, uniform="mini")
+        mini.grid_columnconfigure((0, 1, 2), weight=1, uniform="mini")
 
         def mini_stat(col: int, label: str, value: str, color: str) -> None:
             box = ctk.CTkFrame(mini, fg_color=SURFACE_2, corner_radius=7)
@@ -971,6 +1077,11 @@ class OverlayApp:
 
         mini_stat(0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
         mini_stat(1, self._t("history_mp_loss"), _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
+        meso_s, meso_c = "--", INK_FAINT
+        if summary.meso_gained is not None:
+            meso_s = f"{summary.meso_gained:+,}"
+            meso_c = EXP_COLOR if summary.meso_gained >= 0 else HP_COLOR
+        mini_stat(2, self._t("history_meso"), meso_s, meso_c)
 
     @contextlib.contextmanager
     def _modal(self):
@@ -1133,6 +1244,18 @@ class OverlayApp:
         self._value_labels["mploss"].configure(
             text=_fmt_loss(mp_loss), text_color=MP_COLOR if mp_loss > 0 else INK_FAINT
         )
+
+        # Meso is gold -- EXP_COLOR's amber is the closest existing token.
+        # Signed: spending (potions/items) shows as a negative delta in red.
+        meso = self._session.meso_gained
+        if meso is not None:
+            sign = "+" if meso >= 0 else "-"
+            self._value_labels["mesodiff"].configure(
+                text=f"{sign}{abs(meso):,}",
+                text_color=EXP_COLOR if meso >= 0 else HP_COLOR,
+            )
+        else:
+            self._value_labels["mesodiff"].configure(text="--", text_color=INK)
 
         # Pause/stop/calibration are user- or engine-driven states that take
         # priority over the activity-based idle/tracking read below -- e.g. a

@@ -45,6 +45,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "kv_proj_exp": {"en": "Est. session EXP", "zh": "預估本次經驗值"},
     "kv_hp_loss": {"en": "HP loss", "zh": "HP 損失"},
     "kv_mp_loss": {"en": "MP loss", "zh": "MP 損失"},
+    "kv_meso_diff": {"en": "Meso", "zh": "楓幣"},
 
     "restart_button": {"en": "Restart Session", "zh": "重新開始"},
     "pause_button": {"en": "Pause", "zh": "暫停"},
@@ -55,6 +56,8 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "history_session": {"en": "SESSION #{n}", "zh": "紀錄 #{n}"},
     "history_hp_loss": {"en": "HP LOSS", "zh": "HP 損失"},
     "history_mp_loss": {"en": "MP LOSS", "zh": "MP 損失"},
+    "history_meso": {"en": "MESO", "zh": "楓幣"},
+    "history_exp_per_min": {"en": "EXP/MIN", "zh": "經驗/分"},
     "history_restarted_early": {"en": "restarted early", "zh": "提前重啟"},
     "history_clear_button": {"en": "Clear History", "zh": "清除紀錄"},
     "history_clear_confirm_title": {"en": "Clear history", "zh": "清除紀錄"},
@@ -85,6 +88,20 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     },
     "settings_save_on_restart": {
         "en": "Save to History when restarting", "zh": "重新開始時儲存至紀錄",
+    },
+    "settings_track_meso": {
+        "en": "Track meso (inventory)", "zh": "楓幣追蹤（道具欄）",
+    },
+    "settings_track_meso_hint": {
+        "en": "Open the inventory (I) once right after Start and once before the session ends; the gold counter is read both times.",
+        "zh": "開始記錄後與結束前，各開一次道具欄（I），程式會讀取金色楓幣數字。",
+    },
+    "settings_ignore_occlusion": {
+        "en": "Keep reading when covered by other windows", "zh": "被其他視窗遮擋時仍繼續讀取",
+    },
+    "settings_ignore_occlusion_hint": {
+        "en": "Reads whatever is on screen at the stat panel position. May read wrong values when genuinely covered.",
+        "zh": "直接讀取狀態列位置當前的畫面。真的被擋住時可能讀到錯誤數值。",
     },
 
     "unit_min": {"en": "min", "zh": "分鐘"},

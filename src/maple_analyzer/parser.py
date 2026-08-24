@@ -43,6 +43,16 @@ _EXP_CUR_RE = re.compile(r"EXP\D{0,3}(\d+)\s*[\[({]", re.IGNORECASE)
 _EXP_PCT_RE = re.compile(r"(\d{1,2}[.\s:]\d{1,2}|\d{3,4})\s*%")
 _LV_RE = re.compile(r"LV\.?\D{0,3}(\d+)", re.IGNORECASE)
 
+# Meso counter (inventory open) renders as digits with comma separators,
+# e.g. "1,234,567". OCR drops or mangles commas regularly, so accept any
+# digit/comma run and strip the commas -- the digits alone are the value.
+_MESO_RE = re.compile(r"[\d,]+")
+# Anything beyond a quadrillion is OCR garbage, not a real counter (the
+# classic client caps mesos far lower; even a raised-cap server never
+# approaches this). Guards against a stray digit run from some other
+# gold text on screen.
+_MESO_MAX = 10**15
+
 
 @dataclass
 class StatSnapshot:
@@ -102,3 +112,23 @@ def parse_fields(field_text: dict[str, str]) -> StatSnapshot:
         mp_cur=mp_cur, mp_max=mp_max,
         exp_cur=exp_cur, exp_pct=exp_pct,
     )
+
+
+def parse_meso(text: str | None) -> int | None:
+    """Extract the meso counter value from OCR text.
+
+    Accepts '1,234,567', '1234567', and the mangled in-between forms OCR
+    actually produces ('1,234567', 'l234,567' won't match the digit run and
+    yields None). Returns None for empty/unrecognized input and for
+    implausibly large values (OCR garbage from unrelated gold text).
+    """
+    m = _MESO_RE.search(text or "")
+    if not m:
+        return None
+    digits = m.group(0).replace(",", "")
+    if not digits:
+        return None
+    value = int(digits)
+    if value > _MESO_MAX:
+        return None
+    return value
