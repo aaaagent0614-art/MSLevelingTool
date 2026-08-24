@@ -24,6 +24,13 @@ for pkg in ("customtkinter", "rapidocr_onnxruntime"):
     binaries += pkg_binaries
     hiddenimports += pkg_hiddenimports
 
+# Traditional-Chinese recognition model + dictionary for the map-name OCR
+# (see ocr.MapNameOcr). Bundled as data files so MapNameOcr._resource_path()
+# can find them under sys._MEIPASS when frozen.
+datas += [
+    (str(repo_root / "src" / "maple_analyzer" / "models"), "maple_analyzer/models"),
+]
+
 # pywin32 modules are imported dynamically inside capture.py's
 # GameWindowCapture.__init__ (they only exist on Windows), so list them
 # explicitly rather than relying on PyInstaller's bytecode scan to spot the

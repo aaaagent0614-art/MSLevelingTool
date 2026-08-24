@@ -5,6 +5,8 @@ venv/
 *.db
 *.sqlite
 *.onnx
+# ... except the Traditional-Chinese map-OCR model bundled with the source.
+!src/maple_analyzer/models/*.onnx
 .DS_Store
 overlay_std*.log
 overlay.pid
