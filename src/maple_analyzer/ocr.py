@@ -30,3 +30,25 @@ class StatPanelOcr:
         if not result:
             return ""
         return result[0][0]
+
+    def detect_text(self, image: Image.Image) -> list[tuple[int, int, int, int, str]]:
+        """Full detection over an arbitrary frame: returns (x, y, w, h, text)
+        tuples in image-pixel coordinates.
+
+        Expensive (~600ms measured on the game's panel-sized crops, more on a
+        full frame) -- the module docstring explains why the per-tick stat
+        path avoids detection entirely. For meso the box genuinely isn't
+        known in advance (the inventory is draggable), so a full scan is the
+        only reliable way to find it; callers are expected to throttle it
+        (see overlay's MESO_SCAN_INTERVAL_TICKS)."""
+        result, _elapse = self._engine(np.array(image), use_det=True, use_cls=False)
+        if not result:
+            return []
+        boxes: list[tuple[int, int, int, int, str]] = []
+        for box, text, _score in result:
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            boxes.append(
+                (int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)), text)
+            )
+        return boxes

@@ -51,7 +51,7 @@ from PIL import Image
 from .capture import PANEL_OBSCURED
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
-from .parser import StatSnapshot, parse_fields, parse_meso
+from .parser import StatSnapshot, find_meso_from_boxes, parse_fields
 from .rate import Session, SessionSummary
 from .settings import Settings
 
@@ -102,6 +102,11 @@ TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
 SCALE_STEP_PCT = 10
 SCALE_MIN_PCT = 50
 SCALE_MAX_PCT = 150
+# Meso scans use full-frame *detection* OCR (~600ms+), which would blow the
+# tick budget if run every tick. One scan per this many ticks (~5s at 2Hz)
+# is plenty: the user opens the inventory once per session end, and a
+# reading landing within a few seconds is invisible to them.
+MESO_SCAN_INTERVAL_TICKS = 10
 
 # Live tab's Pause/Resume/Start + Restart button row -- see _apply_run_state.
 BUTTON_HEIGHT = 28
@@ -148,7 +153,7 @@ class PanelSource(Protocol):
     def grab_fields(self) -> dict:
         ...
 
-    def grab_meso(self) -> Image.Image | None:
+    def grab_full(self) -> Image.Image:
         ...
 
 
@@ -837,20 +842,25 @@ class OverlayApp:
 
     def _try_read_meso(self) -> None:
         """One meso counter read attempt (called from _do_tick when
-        track_meso is on): grab the gold-text crop, OCR it, feed any
-        plausible number to the session.
+        track_meso is on).
 
-        Silent on every failure mode -- no gold text on screen (inventory
+        The counter lives in the draggable inventory window, so its position
+        is unknown a priori -- full-frame *detection* OCR finds it (see
+        parser.find_meso_from_boxes). Detection is expensive, so this is
+        throttled to MESO_SCAN_INTERVAL_TICKS; the extra 5s latency is
+        invisible because the user opens the inventory deliberately at each
+        session end.
+
+        Silent on every failure mode -- no digit blob on screen (inventory
         closed) is the normal state, and a capture/OCR hiccup here shouldn't
         take down the tick or spam the log the way stat-panel errors do."""
-        try:
-            crop = self._source.grab_meso()
-        except Exception:
+        self._meso_scan_ticks = getattr(self, "_meso_scan_ticks", 0) + 1
+        if self._meso_scan_ticks < MESO_SCAN_INTERVAL_TICKS:
             return
-        if crop is None:
-            return
+        self._meso_scan_ticks = 0
         try:
-            meso = parse_meso(self._ocr.read_field(crop))
+            frame = self._source.grab_full()
+            meso = find_meso_from_boxes(self._ocr.detect_text(frame), frame.size)
         except Exception:
             return
         if meso is None:

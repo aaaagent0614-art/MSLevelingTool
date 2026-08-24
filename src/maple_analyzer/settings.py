@@ -41,10 +41,10 @@ class Settings:
     # out, and per-entry deletion (see OverlayApp._on_delete_history_clicked)
     # is the escape hatch for a throwaway entry now that one exists.
     save_on_restart: bool = True
-    # Meso tracking (see capture.find_meso_crop / rate.Session.record_meso):
-    # watch the gold inventory counter and record the session's net meso
-    # change. The user opens the inventory once after Start and once before
-    # the session ends; the first/last readings become the endpoints.
+    # Meso tracking (see parser.find_meso_from_boxes / rate.Session.record_meso):
+    # watch the inventory counter and record the session's net meso change.
+    # The user opens the inventory once after Start and once before the
+    # session ends; the first/last readings become the endpoints.
     track_meso: bool = False
     # Skip the stat-panel occlusion probe and OCR whatever is on screen at
     # the panel's position (useful with magnifier overlays like Megapipe;

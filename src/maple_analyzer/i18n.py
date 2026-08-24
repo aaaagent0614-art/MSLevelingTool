@@ -93,8 +93,8 @@ _STRINGS: dict[str, dict[Lang, str]] = {
         "en": "Track meso (inventory)", "zh": "楓幣追蹤（道具欄）",
     },
     "settings_track_meso_hint": {
-        "en": "Open the inventory (I) once right after Start and once before the session ends; the gold counter is read both times.",
-        "zh": "開始記錄後與結束前，各開一次道具欄（I），程式會讀取金色楓幣數字。",
+        "en": "Open the inventory (I) once right after Start and once before the session ends; the meso counter is read both times.",
+        "zh": "開始記錄後與結束前，各開一次道具欄（I），程式會讀取楓幣數字。",
     },
     "settings_ignore_occlusion": {
         "en": "Keep reading when covered by other windows", "zh": "被其他視窗遮擋時仍繼續讀取",

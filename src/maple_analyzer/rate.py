@@ -51,8 +51,8 @@ class SessionSummary:
     # a session spans one, since the game's counter resets to ~0. None only for
     # summaries built before this existed, which fall back to the subtraction.
     exp_gained: int | None = None
-    # Meso delta over the session, from the gold inventory counter (see
-    # capture.find_meso_crop). Both endpoints are real OCR readings: the
+    # Meso delta over the session, from the inventory counter (see
+    # parser.find_meso_from_boxes). Both endpoints are real OCR readings: the
     # first valid meso value seen after the session started, and the last
     # one seen before it finalized. None when the inventory was never
     # opened (or track_meso was off) during the session. Signed: buying
@@ -703,12 +703,12 @@ class Session:
 
         The inventory counter is the only reliable meso source, and it only
         exists while the inventory window is open (which also obscures the
-        stat panel -- see capture.find_meso_crop). So unlike HP/MP/EXP there
-        is no continuous stream to filter: the user opens the inventory once
-        after Start and once before the session ends, and each valid reading
-        becomes the corresponding endpoint. First reading after start =
-        baseline, every later reading keeps updating the end value, so the
-        last reading before finalize is the end point.
+        stat panel -- see parser.find_meso_from_boxes). So unlike HP/MP/EXP
+        there is no continuous stream to filter: the user opens the
+        inventory once after Start and once before the session ends, and
+        each valid reading becomes the corresponding endpoint. First reading
+        after start = baseline, every later reading keeps updating the end
+        value, so the last reading before finalize is the end point.
 
         No-op while paused or before the session has actually started
         (elapsed() needs a real start to anchor a baseline to)."""

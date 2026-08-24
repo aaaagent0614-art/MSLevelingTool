@@ -50,8 +50,16 @@ _MESO_RE = re.compile(r"[\d,]+")
 # Anything beyond a quadrillion is OCR garbage, not a real counter (the
 # classic client caps mesos far lower; even a raised-cap server never
 # approaches this). Guards against a stray digit run from some other
-# gold text on screen.
+# text on screen.
 _MESO_MAX = 10**15
+# A detection box counts as the meso counter only if its text is PURE
+# digits/commas (the counter renders as '154,821' with no label in the
+# same box). Item stack counts qualify too -- they're just smaller (see
+# find_meso_from_boxes' scoring).
+_MESO_PURE_DIGIT_RE = re.compile(r"^[\d,]+$")
+# The stat panel strip (LV/HP/MP/EXP) sits at the bottom of the client --
+# its LV value is also pure digits and must never be picked as meso.
+_STAT_STRIP_MARGIN = 50
 
 
 @dataclass
@@ -120,7 +128,7 @@ def parse_meso(text: str | None) -> int | None:
     Accepts '1,234,567', '1234567', and the mangled in-between forms OCR
     actually produces ('1,234567', 'l234,567' won't match the digit run and
     yields None). Returns None for empty/unrecognized input and for
-    implausibly large values (OCR garbage from unrelated gold text).
+    implausibly large values (OCR garbage from unrelated text).
     """
     m = _MESO_RE.search(text or "")
     if not m:
@@ -132,3 +140,36 @@ def parse_meso(text: str | None) -> int | None:
     if value > _MESO_MAX:
         return None
     return value
+
+
+def find_meso_from_boxes(
+    boxes: list[tuple[int, int, int, int, str]], frame_size: tuple[int, int]
+) -> int | None:
+    """Pick the meso counter out of full-frame detection boxes.
+
+    `boxes` are (x, y, w, h, text) from ocr.detect_text(). The meso counter
+    is the largest pure-digit text blob on screen that is NOT in the bottom
+    stat-panel strip (the LV value there is also pure digits). Item stack
+    counts are pure digits too but smaller; when digit counts tie, the lower
+    blob wins -- the counter sits at the bottom edge of the inventory
+    window, below the item grid. None when nothing qualifies (inventory
+    closed)."""
+    fw, fh = frame_size
+    candidates: list[tuple[int, int, str]] = []
+    for x, y, w, h, text in boxes:
+        stripped = text.strip()
+        if not _MESO_PURE_DIGIT_RE.match(stripped):
+            continue
+        if y + h > fh - _STAT_STRIP_MARGIN:
+            continue  # stat-panel strip: LV/HP/MP/EXP live here
+        digits = stripped.replace(",", "")
+        if not digits:
+            continue
+        if int(digits) > _MESO_MAX:
+            continue
+        candidates.append((len(digits), y, stripped))
+    if not candidates:
+        return None
+    # Most digits wins; ties break toward the bottom of the screen.
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    return parse_meso(candidates[-1][2])
