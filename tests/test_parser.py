@@ -48,6 +48,15 @@ def test_space_for_dot_in_pct():
     assert snap.exp_pct == 63.14
 
 
+def test_stray_space_around_dot_in_pct():
+    # Live capture (2026-08-24) showed OCR inserting a space *before* a
+    # surviving decimal point -- '53.73%' came back as '53 .73%'. The old
+    # single-separator regex didn't match it, silently losing exp_pct.
+    snap = parse_fields({"EXP": "EXP 74502[53 .73%]"})
+    assert snap.exp_cur == 74502
+    assert snap.exp_pct == 53.73
+
+
 def test_short_digit_run_before_percent_not_matched():
     # A bare 1-2 digit run is deliberately ambiguous, per parser.py -- should
     # not be picked up as a percentage.

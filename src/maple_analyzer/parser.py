@@ -34,13 +34,14 @@ _PAIR_RE = {
 _EXP_CUR_RE = re.compile(r"EXP\D{0,3}(\d+)\s*[\[({]", re.IGNORECASE)
 # Percentage is 0-99.99. Separator between the two digit groups is normally
 # '.', but OCR sometimes drops it entirely (bare 3-4 digit run) or -- seen
-# with recognition-only OCR on this tiny font -- reads it as a space or a
-# colon instead ('63 14%', '75:11%'). The colon form showed up in 37 of 235
-# ticks in a live capture (2026-08-17), each one silently costing exp_pct and
-# with it the EXP% display and the level-up ETA. All forms captured here;
-# _normalize_pct interprets them. A bare 1-2 digit run is deliberately NOT
-# matched, ambiguous with stray adjacent OCR noise.
-_EXP_PCT_RE = re.compile(r"(\d{1,2}[.\s:]\d{1,2}|\d{3,4})\s*%")
+# with recognition-only OCR on this tiny font -- reads it as a space, a colon,
+# or inserts a stray space around the dot ('63 14%', '75:11%', '53 .73%'). The
+# separator class is `+` (one-or-more) precisely for that last form, where the
+# dot survives but a space lands in front of it; a bare 3-4 digit run (no
+# separator at all) stays its own alternative so a dot-free read still parses.
+# A bare 1-2 digit run is deliberately NOT matched, ambiguous with stray
+# adjacent OCR noise.
+_EXP_PCT_RE = re.compile(r"(\d{1,2}[\s.:]+\d{1,2}|\d{3,4})\s*%")
 _LV_RE = re.compile(r"LV\.?\D{0,3}(\d+)", re.IGNORECASE)
 
 # Detection-text patterns for locating the stat panel fields in a full-frame
@@ -84,12 +85,14 @@ class StatSnapshot:
 
 
 def _normalize_pct(raw: str) -> float:
-    # Recognition-only OCR on the tiny EXP field font sometimes reads the
-    # decimal point as a space ('63 14%') or a colon ('75:11%') rather than
-    # dropping it outright -- treat both the same as a dot.
-    raw = raw.replace(" ", ".").replace(":", ".")
-    if "." in raw:
-        return float(raw)
+    # Recognition-only OCR on the tiny EXP field font reads the decimal point
+    # as a space ('63 14%') or colon ('75:11%'), or inserts a stray space around
+    # it ('53 .73%'). When any separator survives, collapse the whole separator
+    # run to a single dot. A bare digit run (dot dropped entirely, e.g. '5373'
+    # for '53.73') has no separator, so fall back to treating the last two
+    # digits as the fraction -- this game's percentage is always 2dp.
+    if re.search(r"[\s:.]", raw):
+        return float(re.sub(r"[\s:.]+", ".", raw).strip("."))
     if len(raw) > 2:
         return float(f"{raw[:-2]}.{raw[-2:]}")
     return float(raw)
