@@ -1,19 +1,66 @@
 """UI-layer settings, as a single struct.
 
-Deliberately a plain dataclass with JSON-primitive fields only (str/int/bool),
-same reasoning as rate.py's SessionSummary -- this is the shape a future
-persistence layer (see ~/.claude/notes/maplestory-analyzer/ui-plan-2026-08-17.md)
-would load/save wholesale, e.g. `json.dumps(dataclasses.asdict(settings))`.
-overlay.py should read/write through a single `self._settings` instance rather
-than scattering individual attributes across OverlayApp, so that swapping in
-disk persistence later is "load one struct, save one struct" instead of a
-field-by-field migration.
+Deliberately a plain dataclass with JSON-primitive fields only (str/int/bool/
+tuple-of-int), same reasoning as rate.py's SessionSummary -- this is the shape
+the persistence layer loads/saves wholesale. overlay.py reads/writes through a
+single `self._settings` instance rather than scattering individual attributes
+across OverlayApp, so "load one struct, save one struct" is all that happens.
+
+Persistence: settings are written to a JSON file next to the exe (frozen) or in
+the cwd (dev). The tuple region fields are stored as lists and converted back
+on load.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from .i18n import Lang
+
+
+def app_data_dir() -> Path:
+    """Directory for persisted files: next to the exe when frozen (the
+    extracted MSLevelingTool folder), else the current working directory."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path.cwd()
+
+
+def settings_path() -> Path:
+    return app_data_dir() / "MSLevelingTool.settings.json"
+
+
+# The only non-JSON-native fields are the (l, t, r, b) screen-region tuples,
+# which are stored as lists.
+_REGION_FIELDS = ("manual_stat_region", "manual_meso_region", "map_region")
+
+
+def save_settings(s: "Settings") -> None:
+    try:
+        data = asdict(s)
+        for key in _REGION_FIELDS:
+            value = data.get(key)
+            data[key] = list(value) if value is not None else None
+        settings_path().write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        # Persistence is best-effort -- never let a failed save take down the app.
+        pass
+
+
+def load_settings() -> "Settings":
+    try:
+        data = json.loads(settings_path().read_text(encoding="utf-8"))
+        for key in _REGION_FIELDS:
+            value = data.get(key)
+            data[key] = tuple(value) if value is not None else None
+        return Settings(**data)
+    except Exception:
+        # Missing/corrupt/old-format file -> fresh defaults.
+        return Settings()
 
 
 @dataclass
@@ -33,20 +80,15 @@ class Settings:
     # Whether the timer rolling over finalizes+commits to History and then
     # STOPS, vs. finalizing and immediately starting the next session (the
     # only behaviour before this setting existed). Default on per user
-    # request -- see ~/.claude/notes/maplestory-analyzer/feature-plan-2026-08-23.md.
+    # request.
     auto_stop: bool = True
     # Whether the manual Restart button commits the in-progress session to
     # History before discarding it. Governs Restart only -- auto_stop's
-    # timer-driven finalize always commits regardless of this. Default on
-    # per user request (2026-08-23, revised from the original off default):
-    # a restarted session's progress should be kept unless the user opts
-    # out, and per-entry deletion (see OverlayApp._on_delete_history_clicked)
-    # is the escape hatch for a throwaway entry now that one exists.
+    # timer-driven finalize always commits regardless of this. Default on.
     save_on_restart: bool = True
-    # Meso tracking (see parser.find_meso_from_boxes / rate.Session.record_meso):
-    # watch the inventory counter and record the session's net meso change.
-    # The user opens the inventory once after Start and once before the
-    # session ends; the first/last readings become the endpoints.
+    # Meso tracking: watch the inventory counter and record the session's net
+    # meso change. The user opens the inventory once after Start and once
+    # before the session ends; the first/last readings become the endpoints.
     # Default on per user request (2026-08-24).
     track_meso: bool = True
     # Manual screen-region calibration (2026-08-24). When use_manual is on and
@@ -59,3 +101,10 @@ class Settings:
     manual_stat_region: tuple[int, int, int, int] | None = None  # (l, t, r, b) screen px
     manual_meso_region: tuple[int, int, int, int] | None = None
     use_manual: bool = False
+    # Map name (2026-08-24). The dashboard shows a "地圖" field: either typed
+    # by hand, or auto-filled by OCR when map_auto is on and map_region is
+    # marked (the map-name text on screen, e.g. the area banner). Auto is off
+    # by default per user request.
+    map_name: str = ""
+    map_auto: bool = False
+    map_region: tuple[int, int, int, int] | None = None

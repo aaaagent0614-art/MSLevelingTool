@@ -117,6 +117,7 @@ class _StubApp:
         self._stop_button = _StubWidget()
         self._value_labels: dict = defaultdict(_StubWidget)
         self._bars: dict = defaultdict(_StubWidget)
+        self._map_value_label = _StubWidget()
 
         self.rebuild_calls = 0
 
@@ -128,6 +129,12 @@ class _StubApp:
 
     def _try_locate(self):
         pass  # background locator thread is out of scope for run-state tests
+
+    def _save_history(self):
+        pass  # no disk I/O in run-state tests
+
+    def _persist_settings(self):
+        pass  # no disk I/O in run-state tests
 
     # Bound to the real implementations -- these are the actual behaviour
     # under test, not stand-ins.
@@ -148,6 +155,7 @@ class _StubApp:
     _on_restart_clicked = OverlayApp._on_restart_clicked
     _on_stop_clicked = OverlayApp._on_stop_clicked
     _on_pause_button_clicked = OverlayApp._on_pause_button_clicked
+    _detect_map_name_once = OverlayApp._detect_map_name_once
     _apply_run_state = OverlayApp._apply_run_state
     _on_delete_history_clicked = OverlayApp._on_delete_history_clicked
 

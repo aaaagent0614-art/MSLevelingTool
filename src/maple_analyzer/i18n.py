@@ -46,6 +46,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "kv_mp_loss": {"en": "MP loss", "zh": "MP 損失"},
     "kv_meso_start": {"en": "Start meso", "zh": "起始楓幣"},
     "kv_meso_current": {"en": "Current meso", "zh": "當前楓幣"},
+    "kv_map": {"en": "Map", "zh": "地圖"},
 
     "restart_button": {"en": "Restart Session", "zh": "重新開始"},
     "pause_button": {"en": "Pause", "zh": "暫停"},
@@ -119,6 +120,19 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "settings_manual_detect_failed": {
         "en": "Status bar: detection failed, re-mark it", "zh": "狀態列：偵測失敗，請重新框選",
     },
+    "settings_manual_missing_prompt": {
+        "en": "Please mark the manual positions first, or switch to auto.",
+        "zh": "請先標記手動設定位置，或改為自動。",
+    },
+    "settings_map": {"en": "MAP", "zh": "地圖"},
+    "settings_map_auto": {
+        "en": "Auto-fill map name", "zh": "自動帶入地圖名稱",
+    },
+    "settings_set_map_region": {
+        "en": "Mark map name position", "zh": "標記地圖位置",
+    },
+    "settings_map_region_set": {"en": "Map: set", "zh": "地圖：已設定"},
+    "settings_map_region_unset": {"en": "Map: not set", "zh": "地圖：未設定"},
     "region_selector_hint": {
         "en": "Drag to mark the area, release to confirm (Esc to cancel)",
         "zh": "拖曳框選範圍，放開滑鼠完成（Esc 取消）",
@@ -133,6 +147,8 @@ _STRINGS: dict[str, dict[Lang, str]] = {
 
     "rename_dialog_title": {"en": "Rename session", "zh": "重新命名紀錄"},
     "rename_dialog_prompt": {"en": "Session name:", "zh": "紀錄名稱："},
+    "map_dialog_title": {"en": "Map name", "zh": "地圖名稱"},
+    "map_dialog_prompt": {"en": "Map name:", "zh": "地圖名稱："},
 }
 
 

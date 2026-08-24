@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import json
 import os
 import sys
 import threading
@@ -53,7 +54,7 @@ from .i18n import Lang, t
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, find_meso_candidate, find_meso_in_region, find_stat_fields, parse_fields, parse_meso
 from .rate import Session, SessionSummary
-from .settings import Settings
+from .settings import Settings, app_data_dir, load_settings, save_settings
 
 
 def _open_log_file():
@@ -69,6 +70,12 @@ def _open_log_file():
         return open(path, "a", encoding="utf-8", errors="replace")
     except OSError:
         return open(os.devnull, "w", encoding="utf-8", errors="replace")
+
+
+def _history_path() -> str:
+    """Where the session history persists (next to the exe when frozen, else
+    the cwd)."""
+    return str(app_data_dir() / "MSLevelingTool.history.json")
 
 # The console's codepage (e.g. cp950 Traditional Chinese) can't represent
 # every character OCR might misread out of the game's UI -- printing one
@@ -292,8 +299,8 @@ class OverlayApp:
         self._source = source
         self._ocr = StatPanelOcr()
         self._session = Session()
-        self._session_history: list[SessionSummary] = []
-        self._settings = Settings()
+        self._session_history: list[SessionSummary] = self._load_history()
+        self._settings = load_settings()
 
         self._last: StatSnapshot = StatSnapshot(None, None, None, None, None, None, None)
         # Newest-first: History cards are inserted at index 0 rather than
@@ -361,7 +368,7 @@ class OverlayApp:
         self.root.title("MapleStoryAnalyzer")
         self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
-        self.root.geometry("260x420+40+40")
+        self.root.geometry("340x460+40+40")
 
         # segmented_button_font is deliberately set to the same chrome font
         # as the rest of the UI: without it, CTkTabview falls back to
@@ -388,6 +395,7 @@ class OverlayApp:
 
         self._build_live_tab(self._tabview.tab(self._tab_names["live"]))
         self._build_history_tab(self._tabview.tab(self._tab_names["history"]))
+        self._rebuild_history_cards()
         self._build_settings_tab(self._tabview.tab(self._tab_names["settings"]))
         self._tabview.set(self._tab_names["live"])  # CTkTabview defaults to the last-added tab otherwise
         self._apply_visibility()
@@ -442,6 +450,7 @@ class OverlayApp:
         if lang == self._settings.language:
             return
         self._settings.language = lang
+        self._persist_settings()
 
         for logical, key in (("live", "tab_live"), ("history", "tab_history"), ("settings", "tab_settings")):
             old_name = self._tab_names[logical]
@@ -474,6 +483,7 @@ class OverlayApp:
         # _append_history_card already picks up the new language/font.
         self._rebuild_history_cards()
         self._refresh_manual_status()
+        self._refresh_map_status()
 
         self._render(self._last)  # refreshes status pill / timer text immediately
 
@@ -574,6 +584,17 @@ class OverlayApp:
         add_kv_row(exp_card, 1, "expdiff", "kv_exp_diff")
         add_kv_row(exp_card, 2, "eta", "kv_eta")
         add_kv_row(exp_card, 3, "projexp", "kv_proj_exp")
+        # Map name (editable): click the value to type; auto-filled when
+        # map_auto is on (see _detect_map_name_once). Uses a regular (non-
+        # mono) font because map names are CJK text.
+        map_lbl = ctk.CTkLabel(exp_card, text_color=INK_DIM, anchor="w")
+        self._i18n(map_lbl, "kv_map", size=11, bold=False)
+        map_lbl.grid(row=4, column=0, sticky="w", padx=(12, 6), pady=0)
+        self._map_value_label = ctk.CTkLabel(
+            exp_card, text="--", font=self._font(12), text_color=INK, anchor="e", cursor="hand2",
+        )
+        self._map_value_label.grid(row=4, column=1, sticky="e", padx=(6, 12), pady=0)
+        self._map_value_label.bind("<Button-1>", lambda _e: self._on_map_edit())
 
         loss_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
         loss_card.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 6))
@@ -655,7 +676,7 @@ class OverlayApp:
         # was getting clipped to invisible. The header always has room.
         self._scale_header_label = ctk.CTkLabel(
             window_card, text=self._scale_header_text(),
-            anchor="w", text_color=INK_DIM, font=self._font(10, bold=True),
+            anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
         )
         self._scale_header_label.pack(fill="x", padx=12, pady=(5, 0))
         scale_row = ctk.CTkFrame(window_card, fg_color="transparent")
@@ -665,11 +686,11 @@ class OverlayApp:
         # SCALE_STEP_PCT taps are precise and don't need fine motor control.
         ctk.CTkButton(
             scale_row, text="-", width=36, command=lambda: self._on_scale_step(-SCALE_STEP_PCT),
-            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK, font=_FONT_UI_BOLD,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK, font=self._font(11, bold=True),
         ).pack(side="left")
         ctk.CTkButton(
             scale_row, text="+", width=36, command=lambda: self._on_scale_step(SCALE_STEP_PCT),
-            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK, font=_FONT_UI_BOLD,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK, font=self._font(11, bold=True),
         ).pack(side="left", padx=(6, 0))
 
         self._topmost_var = tk.BooleanVar(value=self._settings.topmost)
@@ -682,7 +703,7 @@ class OverlayApp:
         lang_row = ctk.CTkFrame(window_card, fg_color="transparent")
         lang_row.pack(fill="x", padx=12, pady=(0, 4))
         self._i18n(
-            ctk.CTkLabel(lang_row, anchor="w", text_color=INK_DIM), "settings_language", size=10, bold=True
+            ctk.CTkLabel(lang_row, anchor="w", text_color=INK_DIM), "settings_language", size=11, bold=True
         ).pack(side="left")
         self._lang_button = ctk.CTkSegmentedButton(
             lang_row, values=["中文", "EN"], command=self._on_language_button_changed,
@@ -696,7 +717,7 @@ class OverlayApp:
 
         self._interval_header_label = ctk.CTkLabel(
             card, text=self._interval_header_text(),
-            anchor="w", text_color=INK_DIM, font=self._font(10, bold=True),
+            anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
         )
         self._interval_header_label.pack(fill="x", padx=12, pady=(5, 0))
         slider_row = ctk.CTkFrame(card, fg_color="transparent")
@@ -709,7 +730,7 @@ class OverlayApp:
         slider.pack(fill="x", expand=True)
 
         self._i18n(
-            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_display", size=10, bold=True
+            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_display", size=11, bold=True
         ).pack(fill="x", padx=12, pady=(2, 0))
 
         self._switch_vars: dict[str, tk.BooleanVar] = {}
@@ -733,7 +754,7 @@ class OverlayApp:
         # hides/shows a widget, so they bypass _on_switch_changed/_apply_visibility
         # entirely (see _on_auto_stop_changed/_on_save_on_restart_changed).
         self._i18n(
-            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_session", size=10, bold=True
+            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_session", size=11, bold=True
         ).pack(fill="x", padx=12, pady=(3, 0))
 
         self._auto_stop_var = tk.BooleanVar(value=self._settings.auto_stop)
@@ -755,7 +776,7 @@ class OverlayApp:
         # extra. Needs the user to open the inventory at both session ends
         # to land the endpoint readings. Default on (2026-08-24).
         self._i18n(
-            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_track_meso", size=10, bold=True
+            ctk.CTkLabel(card, anchor="w", text_color=INK_DIM), "settings_track_meso", size=11, bold=True
         ).pack(fill="x", padx=12, pady=(3, 0))
 
         self._track_meso_var = tk.BooleanVar(value=self._settings.track_meso)
@@ -777,7 +798,7 @@ class OverlayApp:
         manual_card.pack(fill="x", padx=2, pady=(4, 2))
 
         self._i18n(
-            ctk.CTkLabel(manual_card, anchor="w", text_color=INK_DIM), "settings_manual", size=10, bold=True
+            ctk.CTkLabel(manual_card, anchor="w", text_color=INK_DIM), "settings_manual", size=11, bold=True
         ).pack(fill="x", padx=12, pady=(5, 0))
 
         self._use_manual_var = tk.BooleanVar(value=self._settings.use_manual)
@@ -805,9 +826,46 @@ class OverlayApp:
 
         self._manual_status_label = ctk.CTkLabel(
             manual_card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT,
+            font=self._font(9, bold=False),
         )
-        self._manual_status_label.pack(fill="x", padx=12, pady=(0, 5))
+        self._manual_status_label.pack(fill="x", padx=12, pady=(0, 3))
+        self._manual_warning_label = ctk.CTkLabel(
+            manual_card, anchor="w", wraplength=210, justify="left", text_color=HP_COLOR,
+            font=self._font(9, bold=True),
+        )
+        self._manual_warning_label.pack(fill="x", padx=12, pady=(0, 5))
         self._refresh_manual_status()
+
+        # MAP: optional auto-filled map name -- mark where the map name appears
+        # on screen; with map_auto on it's OCR'd into the dashboard 地圖 field.
+        map_card = ctk.CTkFrame(scroll, fg_color=SURFACE, corner_radius=12)
+        map_card.pack(fill="x", padx=2, pady=(4, 2))
+
+        self._i18n(
+            ctk.CTkLabel(map_card, anchor="w", text_color=INK_DIM), "settings_map", size=11, bold=True
+        ).pack(fill="x", padx=12, pady=(5, 0))
+
+        self._map_auto_var = tk.BooleanVar(value=self._settings.map_auto)
+        self._i18n(ctk.CTkSwitch(
+            map_card, variable=self._map_auto_var, text_color=INK,
+            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
+            command=self._on_map_auto_changed,
+        ), "settings_map_auto", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 3))
+
+        self._map_region_button = ctk.CTkButton(
+            map_card, command=self._on_set_map_region,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
+            corner_radius=9, height=28,
+        )
+        self._i18n(self._map_region_button, "settings_set_map_region", size=11, bold=True)
+        self._map_region_button.pack(fill="x", padx=12, pady=(0, 3))
+
+        self._map_status_label = ctk.CTkLabel(
+            map_card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT,
+            font=self._font(9, bold=False),
+        )
+        self._map_status_label.pack(fill="x", padx=12, pady=(0, 5))
+        self._refresh_map_status()
 
     # ---- settings callbacks ------------------------------------------------
 
@@ -824,10 +882,12 @@ class OverlayApp:
         factor = pct / 100
         ctk.set_widget_scaling(factor)
         ctk.set_window_scaling(factor)
+        self._persist_settings()
 
     def _on_topmost_changed(self) -> None:
         self._settings.topmost = self._topmost_var.get()
         self.root.attributes("-topmost", self._settings.topmost)
+        self._persist_settings()
 
     def _on_language_button_changed(self, value: str) -> None:
         self._apply_language("zh" if value == "中文" else "en")
@@ -835,24 +895,29 @@ class OverlayApp:
     def _on_interval_changed(self, value: float) -> None:
         self._settings.window_min = round(value)
         self._interval_header_label.configure(text=self._interval_header_text())
+        self._persist_settings()
         # Doesn't retroactively affect the currently-running session's
         # already-baked-in target -- takes effect for the *next* session,
         # same as the interval_minutes recorded on SessionSummary.finalize().
 
     def _on_switch_changed(self, key: str, attr: str, var: tk.BooleanVar) -> None:
         setattr(self._settings, attr, var.get())
+        self._persist_settings()
         if key != "exp_pct":  # visibility-affecting; exp_pct only changes rendered text
             self._apply_visibility()
         self._render(self._last)  # immediate feedback
 
     def _on_auto_stop_changed(self) -> None:
         self._settings.auto_stop = self._auto_stop_var.get()
+        self._persist_settings()
 
     def _on_save_on_restart_changed(self) -> None:
         self._settings.save_on_restart = self._save_on_restart_var.get()
+        self._persist_settings()
 
     def _on_track_meso_changed(self) -> None:
         self._settings.track_meso = self._track_meso_var.get()
+        self._persist_settings()
         # The live tab's Meso row is gated on this setting (see
         # _apply_visibility) -- show/hide it immediately.
         self._apply_visibility()
@@ -878,6 +943,29 @@ class OverlayApp:
         region source when manual mode is on, otherwise the auto source."""
         return self._manual_source if self._manual_source is not None else self._source
 
+    # ---- persistence -------------------------------------------------------
+
+    def _load_history(self) -> list[SessionSummary]:
+        """Load persisted session history from disk; empty list on any error."""
+        try:
+            with open(_history_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            return [SessionSummary(**d) for d in data]
+        except Exception:
+            return []
+
+    def _save_history(self) -> None:
+        """Best-effort persist of the session history to disk."""
+        try:
+            data = [dataclasses.asdict(s) for s in self._session_history]
+            with open(_history_path(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _persist_settings(self) -> None:
+        save_settings(self._settings)
+
     def _refresh_manual_status(self) -> None:
         """Update the settings status line to show whether each manual region
         has been marked (with its screen coordinates when set)."""
@@ -894,6 +982,12 @@ class OverlayApp:
             line(s.manual_meso_region, "settings_meso_region_set", "settings_meso_region_unset"),
             *self._manual_feedback_lines(),
         ]))
+        # Red warning when manual mode is on but the stat region (the one
+        # required to start) hasn't been marked yet.
+        if s.use_manual and s.manual_stat_region is None:
+            self._manual_warning_label.configure(text="⚠ " + self._t("settings_manual_missing_prompt"))
+        else:
+            self._manual_warning_label.configure(text="")
 
     def _manual_feedback_lines(self) -> list[str]:
         """One extra status line describing the manual-mode detection result,
@@ -906,9 +1000,45 @@ class OverlayApp:
             return [self._t("settings_manual_detected", n=len(self._stat_boxes))]
         return [self._t("settings_manual_detect_failed")]
 
+    def _refresh_map_status(self) -> None:
+        """Update the map-region status line (set + coords, or unset)."""
+        region = self._settings.map_region
+        if region is None:
+            text = self._t("settings_map_region_unset")
+        else:
+            l, t, r, b = region
+            text = f"{self._t('settings_map_region_set')} ({l},{t})-({r},{b})"
+        self._map_status_label.configure(text=text)
+
+    def _on_map_auto_changed(self) -> None:
+        self._settings.map_auto = self._map_auto_var.get()
+        self._persist_settings()
+
+    def _on_set_map_region(self) -> None:
+        self._select_region(self._on_map_region_selected, "settings_set_map_region")
+
+    def _on_map_region_selected(self, region) -> None:
+        self._settings.map_region = region
+        self._refresh_map_status()
+        self._persist_settings()
+
+    def _on_map_edit(self) -> None:
+        with self._modal():
+            name = simpledialog.askstring(
+                self._t("map_dialog_title"), self._t("map_dialog_prompt"),
+                initialvalue=self._settings.map_name, parent=self.root,
+            )
+        if name is None:
+            return
+        self._settings.map_name = name.strip()
+        self._persist_settings()
+        self._render(self._last)
+
     def _on_use_manual_changed(self) -> None:
         self._settings.use_manual = self._use_manual_var.get()
         self._rebuild_manual_source()
+        self._refresh_manual_status()
+        self._persist_settings()
 
     def _on_set_stat_region(self) -> None:
         self._select_region(self._on_stat_region_selected, "settings_set_stat_region")
@@ -920,11 +1050,13 @@ class OverlayApp:
         self._settings.manual_stat_region = region
         self._refresh_manual_status()
         self._rebuild_manual_source()
+        self._persist_settings()
 
     def _on_meso_region_selected(self, region) -> None:
         self._settings.manual_meso_region = region
         self._refresh_manual_status()
         self._rebuild_manual_source()
+        self._persist_settings()
 
     def _select_region(self, callback, title_key: str) -> None:
         """Open the fullscreen region selector and hand the result to `callback`
@@ -1252,6 +1384,24 @@ class OverlayApp:
         except Exception:
             pass
 
+    def _detect_map_name_once(self) -> None:
+        """One-shot map-name OCR at session start (map_auto only). The map does
+        not change mid-session, so there's no need to keep re-reading it."""
+        s = self._settings
+        if not (s.map_auto and s.map_region is not None):
+            return
+        try:
+            from .capture import grab_region
+
+            img = grab_region(s.map_region)
+            text = (self._ocr.read_field(img) or "").strip()
+            if text and text != s.map_name:
+                s.map_name = text
+                self._persist_settings()
+                self._render(self._last)
+        except Exception:
+            pass
+
     def _update_timer_label(self) -> None:
         """Split out of _render so the capture-error path in _do_tick can
         keep the countdown moving without running a full render against
@@ -1301,6 +1451,7 @@ class OverlayApp:
             self._session_history.append(summary)
             self._log(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(summary, len(self._session_history))}")
             self._append_history_card(summary, len(self._session_history))
+            self._save_history()
 
     def _finalize_and_maybe_stop(self) -> None:
         """The timer rolling over. Always commits to History first; then
@@ -1318,12 +1469,14 @@ class OverlayApp:
             self._apply_run_state()
         else:
             self._session.start()
+            self._detect_map_name_once()
 
     def _on_restart_clicked(self) -> None:
         if self._settings.save_on_restart:
             self._commit_session_to_history()
         self._session.start()  # resets pause state too, so a restart from "paused" lands in "running"
         self._run_state = "running"
+        self._detect_map_name_once()
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
@@ -1349,8 +1502,17 @@ class OverlayApp:
             self._session.resume()
             self._run_state = "running"
         else:  # "stopped" -- already committed to History by _finalize_and_maybe_stop
+            # Manual mode requires the stat region before starting -- block with
+            # a prompt instead of silently starting on unmarked positions.
+            if self._settings.use_manual and self._settings.manual_stat_region is None:
+                messagebox.showwarning(
+                    self._t("settings_manual"), self._t("settings_manual_missing_prompt"),
+                    parent=self.root,
+                )
+                return
             self._session.start()
             self._run_state = "running"
+            self._detect_map_name_once()
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
@@ -1572,6 +1734,7 @@ class OverlayApp:
         # removed -- rebuild from scratch rather than patching indices in
         # place, same as _on_clear_history_clicked already does.
         self._rebuild_history_cards()
+        self._save_history()
 
     def _on_clear_history_clicked(self) -> None:
         if not self._session_history:
@@ -1586,6 +1749,7 @@ class OverlayApp:
             return
         self._session_history.clear()
         self._rebuild_history_cards()
+        self._save_history()
 
     def _set_status_error(self, text: str) -> None:
         self._status_pill.configure(text=text, fg_color=SURFACE_2, text_color=HP_COLOR)
@@ -1593,6 +1757,8 @@ class OverlayApp:
     # ---- render --------------------------------------------------------
 
     def _render(self, snap: StatSnapshot) -> None:
+        self._map_value_label.configure(text=self._settings.map_name or "--")
+
         self._value_labels["level"].configure(text=str(snap.level) if snap.level is not None else "--")
 
         if snap.hp_cur is not None:
