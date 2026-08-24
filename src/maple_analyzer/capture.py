@@ -85,13 +85,11 @@ class GameWindowCapture:
         import win32con
         import win32gui
         import win32process
-        import win32ui
 
         self._win32gui = win32gui
         self._win32process = win32process
         self._win32api = win32api
         self._win32con = win32con
-        self._win32ui = win32ui
         self._title_substring = title_substring
         self._process_name = process_name.lower()
         self._hwnd: int | None = None
@@ -161,32 +159,101 @@ class GameWindowCapture:
         return hwnd, right, bottom
 
     def _print_window(self, hwnd: int, cw: int, ch: int) -> Image.Image | None:
-        """Render the window's own client area into a bitmap.
+        """Render the window's own client area into a bitmap via PrintWindow.
 
-        Returns None when the window won't composite (PrintWindow reports 0, or
-        the result is entirely black -- typical for exclusive-fullscreen D3D),
-        so callers can fall back to an mss screen grab.
+        Uses ctypes against gdi32/user32 rather than pywin32's win32ui, because
+        win32ui (pythonwin) links against MFC (mfc140u.dll) which PyInstaller
+        can't reliably bundle -- ctypes has no such dependency. Returns None
+        when the window won't composite (PrintWindow reports 0, or the result
+        is entirely black -- typical for exclusive-fullscreen D3D), so callers
+        can fall back to an mss screen grab.
         """
-        hwnd_dc = self._win32gui.GetWindowDC(hwnd)
-        mfc_dc = self._win32ui.CreateDCFromHandle(hwnd_dc)
-        save_dc = mfc_dc.CreateCompatibleDC()
-        bmp = self._win32ui.CreateBitmap()
-        bmp.CreateCompatibleBitmap(mfc_dc, cw, ch)
-        save_dc.SelectObject(bmp)
-        try:
-            ok = self._win32gui.PrintWindow(
-                hwnd, save_dc.GetSafeHdc(), PW_CLIENTONLY | PW_RENDERFULLCONTENT
-            )
-        finally:
-            self._win32gui.DeleteObject(bmp.GetHandle())
-            save_dc.DeleteDC()
-            mfc_dc.DeleteDC()
-            self._win32gui.ReleaseDC(hwnd, hwnd_dc)
-        if not ok:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        # Pin arg/restypes so 64-bit HWND/HDC/HBITMAP handles aren't truncated
+        # (ctypes defaults to 32-bit c_int arguments otherwise).
+        c_void_p = ctypes.c_void_p
+        user32.GetWindowDC.argtypes = [c_void_p]
+        user32.GetWindowDC.restype = c_void_p
+        user32.ReleaseDC.argtypes = [c_void_p, c_void_p]
+        user32.ReleaseDC.restype = ctypes.c_int
+        user32.PrintWindow.argtypes = [c_void_p, c_void_p, wintypes.UINT]
+        user32.PrintWindow.restype = wintypes.BOOL
+        gdi32.CreateCompatibleDC.argtypes = [c_void_p]
+        gdi32.CreateCompatibleDC.restype = c_void_p
+        gdi32.CreateCompatibleBitmap.argtypes = [c_void_p, ctypes.c_int, ctypes.c_int]
+        gdi32.CreateCompatibleBitmap.restype = c_void_p
+        gdi32.SelectObject.argtypes = [c_void_p, c_void_p]
+        gdi32.SelectObject.restype = c_void_p
+        gdi32.DeleteObject.argtypes = [c_void_p]
+        gdi32.DeleteObject.restype = wintypes.BOOL
+        gdi32.DeleteDC.argtypes = [c_void_p]
+        gdi32.DeleteDC.restype = wintypes.BOOL
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        gdi32.GetDIBits.argtypes = [
+            c_void_p, c_void_p, wintypes.UINT, wintypes.UINT,
+            c_void_p, ctypes.POINTER(BITMAPINFOHEADER), wintypes.UINT,
+        ]
+        gdi32.GetDIBits.restype = ctypes.c_int
+
+        hwnd_dc = user32.GetWindowDC(hwnd)
+        if not hwnd_dc:
             return None
-        info = bmp.GetInfo()
-        bits = bmp.GetBitmapBits(True)
-        img = Image.frombytes("RGB", (info["bmWidth"], info["bmHeight"]), bits, "raw", "BGRX", 0, 1)
+        mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
+        bmp = gdi32.CreateCompatibleBitmap(hwnd_dc, cw, ch)
+        if not mem_dc or not bmp:
+            if mem_dc:
+                gdi32.DeleteDC(mem_dc)
+            if bmp:
+                gdi32.DeleteObject(bmp)
+            user32.ReleaseDC(hwnd, hwnd_dc)
+            return None
+        old_bmp = gdi32.SelectObject(mem_dc, bmp)
+        ok = user32.PrintWindow(hwnd, mem_dc, PW_CLIENTONLY | PW_RENDERFULLCONTENT)
+        if not ok:
+            gdi32.SelectObject(mem_dc, old_bmp)
+            gdi32.DeleteObject(bmp)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(hwnd, hwnd_dc)
+            return None
+
+        bmi = BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.biWidth = cw
+        bmi.biHeight = -ch  # negative height = top-down row order
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = 0  # BI_RGB
+
+        buf = ctypes.create_string_buffer(cw * ch * 4)
+        # DIB_RGB_COLORS (0) -> 32bpp BGRA, top-down, tightly packed.
+        got = gdi32.GetDIBits(mem_dc, bmp, 0, ch, buf, ctypes.byref(bmi), 0)
+        gdi32.SelectObject(mem_dc, old_bmp)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem_dc)
+        user32.ReleaseDC(hwnd, hwnd_dc)
+        if not got:
+            return None
+        img = Image.frombytes("RGB", (cw, ch), buf.raw, "raw", "BGRX", 0, 1)
         # getbbox() is None exactly when every pixel is black -- the signal
         # that DWM didn't hand us the window's content.
         return img if img.getbbox() is not None else None

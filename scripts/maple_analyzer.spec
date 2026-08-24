@@ -27,8 +27,9 @@ for pkg in ("customtkinter", "rapidocr_onnxruntime"):
 # pywin32 modules are imported dynamically inside capture.py's
 # GameWindowCapture.__init__ (they only exist on Windows), so list them
 # explicitly rather than relying on PyInstaller's bytecode scan to spot the
-# imports -- win32ui is the one PrintWindow needs for its memory-DC/bitmap.
-hiddenimports += ["win32ui", "win32gui", "win32api", "win32con", "win32process"]
+# imports. (PrintWindow's GDI work uses ctypes, not win32ui, so there is no
+# MFC/mfc140u.dll dependency to bundle.)
+hiddenimports += ["win32gui", "win32api", "win32con", "win32process"]
 
 a = Analysis(
     [str(repo_root / "scripts" / "run_overlay.py")],
