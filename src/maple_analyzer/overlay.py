@@ -51,7 +51,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from .i18n import Lang, t
-from .ocr import StatPanelOcr
+from .ocr import MapNameOcr, StatPanelOcr
 from .parser import StatSnapshot, find_meso_candidate, find_meso_in_region, find_stat_fields, parse_fields, parse_meso
 from .rate import Session, SessionSummary
 from .settings import Settings, app_data_dir, load_settings, save_settings
@@ -341,6 +341,9 @@ class OverlayApp:
         self._locate_ticks = 0
         self._locate_thread: threading.Thread | None = None
         self._locate_ocr: StatPanelOcr | None = None
+        # Traditional-Chinese map-name OCR engine (see ocr.MapNameOcr) -- lazy
+        # so the extra model isn't loaded until map auto-fill is actually used.
+        self._map_ocr: MapNameOcr | None = None
         # Detected stat-field boxes as fractions of the client frame:
         # {'LV': (fx, fy, fw, fh), ...}. None until the locator has found
         # the panel (tick falls back to regions.FIELD_BOXES meanwhile).
@@ -1403,11 +1406,11 @@ class OverlayApp:
         """One-shot map-name OCR at session start (map_auto only). The map does
         not change mid-session, so there's no need to keep re-reading it.
 
-        Only auto-fills an EMPTY map field: OCR is imperfect on Traditional
-        Chinese (see ocr.read_map_name), and overwriting a manually-corrected
-        name with the same bad read every session was the reported pain point.
-        Once a name is set (by hand or a good OCR) it sticks until the user
-        clears it in the field, which re-arms auto-fill for the next session.
+        Only auto-fills an EMPTY map field: OCR can still misread stylized
+        banner text, and overwriting a manually-corrected name with a bad read
+        every session was the reported pain point. Once a name is set (by hand
+        or a good OCR) it sticks until the user clears it in the field, which
+        re-arms auto-fill for the next session.
         """
         s = self._settings
         if not (s.map_auto and s.map_region is not None):
@@ -1418,10 +1421,14 @@ class OverlayApp:
             from .capture import grab_region
 
             img = grab_region(s.map_region)
-            # Dedicated map-OCR path: upscales the small banner text before
-            # recognition (see ocr.read_map_name), which is what fixes the
-            # '螞蟻洞 I' -> '冏国' class of misreads.
-            text = (self._ocr.read_map_name(img) or "").strip()
+            # Traditional-Chinese OCR (see ocr.MapNameOcr): the Simplified
+            # stat-panel model's dictionary lacks 螞/蟻/…, so map names need a
+            # dedicated `chinese_cht` engine. Lazy-inited on first use.
+            map_ocr = self._map_ocr
+            if map_ocr is None:
+                map_ocr = MapNameOcr()
+                self._map_ocr = map_ocr
+            text = (map_ocr.read_map_name(img) or "").strip()
             if text and text != s.map_name:
                 s.map_name = text
                 self._persist_settings()
