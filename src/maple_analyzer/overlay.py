@@ -40,6 +40,7 @@ import contextlib
 import dataclasses
 import os
 import sys
+import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -102,11 +103,12 @@ TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
 SCALE_STEP_PCT = 10
 SCALE_MIN_PCT = 50
 SCALE_MAX_PCT = 150
-# Meso scans use full-frame *detection* OCR (~600ms+), which would blow the
-# tick budget if run every tick. One scan per this many ticks (~5s at 2Hz)
-# is plenty: the user opens the inventory once per session end, and a
-# reading landing within a few seconds is invisible to them.
-MESO_SCAN_INTERVAL_TICKS = 10
+# Meso scans use full-frame *detection* OCR (~600ms+). Originally run on the
+# tick thread this blocked the whole HUD for that long every scan (user
+# reported the UI feeling laggy when track_meso is on) -- it now runs on a
+# background thread (see _try_read_meso), so the interval only sets how
+# often we LOOK, not how long the UI freezes. Every 5 ticks = ~2.5s.
+MESO_SCAN_INTERVAL_TICKS = 5
 
 # Live tab's Pause/Resume/Start + Restart button row -- see _apply_run_state.
 BUTTON_HEIGHT = 28
@@ -229,6 +231,12 @@ class OverlayApp:
         # instead of repeating the same line every 2s retry.
         self._last_capture_error: str | None = None
         self._last_client_size: tuple[int, int] | None = None
+        # Async meso scan state (see _try_read_meso / _apply_meso_result).
+        # The OCR engine is lazily created inside the worker thread so its
+        # model load (seconds) never blocks the UI thread.
+        self._meso_scan_ticks = 0
+        self._meso_scan_thread: threading.Thread | None = None
+        self._meso_ocr: StatPanelOcr | None = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -853,20 +861,56 @@ class OverlayApp:
 
         Silent on every failure mode -- no digit blob on screen (inventory
         closed) is the normal state, and a capture/OCR hiccup here shouldn't
-        take down the tick or spam the log the way stat-panel errors do."""
+        take down the tick or spam the log the way stat-panel errors do.
+
+        Runs the actual scan on a daemon thread so the tick thread never
+        blocks on full-frame detection OCR (that was the HUD feeling frozen
+        every scan). Tk is only ever touched via root.after from the worker,
+        which marshals back to the main thread."""
         self._meso_scan_ticks = getattr(self, "_meso_scan_ticks", 0) + 1
         if self._meso_scan_ticks < MESO_SCAN_INTERVAL_TICKS:
             return
         self._meso_scan_ticks = 0
-        try:
-            frame = self._source.grab_full()
-            meso = find_meso_from_boxes(self._ocr.detect_text(frame), frame.size)
-        except Exception:
-            return
+        _scan_thread = getattr(self, "_meso_scan_thread", None)
+        if _scan_thread is not None and _scan_thread.is_alive():
+            return  # previous scan still running -- skip this round
+
+        def _scan() -> None:
+            try:
+                # Fresh capture on THIS thread: the shared mss/win32 handles
+                # live on the tick thread, and re-entering them from a second
+                # thread risks races. A new GameWindowCapture is cheap (one
+                # EnumWindows + one grab). On non-Windows (dev/tests) the
+                # shared source is a pure-PIL stand-in, safe to reuse.
+                if sys.platform == "win32":
+                    from .capture import GameWindowCapture
+
+                    frame = GameWindowCapture().grab_full()
+                else:
+                    frame = self._source.grab_full()
+                # Own OCR engine: the main instance is used by the tick
+                # thread concurrently, and RapidOCR is not documented
+                # thread-safe. Lazy-init here so the first scan's model
+                # load (seconds) happens off the UI thread too.
+                meso_ocr = getattr(self, "_meso_ocr", None)
+                if meso_ocr is None:
+                    meso_ocr = StatPanelOcr()
+                    self._meso_ocr = meso_ocr
+                meso = find_meso_from_boxes(meso_ocr.detect_text(frame), frame.size)
+            except Exception:
+                meso = None
+            self.root.after(0, lambda m=meso: self._apply_meso_result(m))
+
+        self._meso_scan_thread = threading.Thread(target=_scan, daemon=True)
+        self._meso_scan_thread.start()
+
+    def _apply_meso_result(self, meso: int | None) -> None:
+        """Main-thread half of the async meso scan (see _try_read_meso)."""
         if meso is None:
             return
         if self._run_state == "running":
             self._session.record_meso(meso)
+            self._render(self._last)  # show the updated meso row promptly
 
     def _update_timer_label(self) -> None:
         """Split out of _render so the capture-error path in _do_tick can
@@ -1256,14 +1300,20 @@ class OverlayApp:
         )
 
         # Meso is gold -- EXP_COLOR's amber is the closest existing token.
-        # Signed: spending (potions/items) shows as a negative delta in red.
+        # Shows BOTH endpoints: "178,375 → +5,000" (start meso, then net
+        # delta; spending shows as a negative delta in red). While only the
+        # baseline is known, show "178,375 → …" to hint the end reading is
+        # still missing (open the inventory again before the session ends).
+        meso_start = self._session.start_meso
         meso = self._session.meso_gained
         if meso is not None:
             sign = "+" if meso >= 0 else "-"
+            text = f"{meso_start:,} → {sign}{abs(meso):,}" if meso_start is not None else f"{sign}{abs(meso):,}"
             self._value_labels["mesodiff"].configure(
-                text=f"{sign}{abs(meso):,}",
-                text_color=EXP_COLOR if meso >= 0 else HP_COLOR,
+                text=text, text_color=EXP_COLOR if meso >= 0 else HP_COLOR,
             )
+        elif meso_start is not None:
+            self._value_labels["mesodiff"].configure(text=f"{meso_start:,} → …", text_color=INK)
         else:
             self._value_labels["mesodiff"].configure(text="--", text_color=INK)
 
