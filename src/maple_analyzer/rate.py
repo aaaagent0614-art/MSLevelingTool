@@ -730,6 +730,12 @@ class Session:
         return self._start_meso
 
     @property
+    def end_meso(self) -> int | None:
+        """The latest valid meso reading of the session. None until the user
+        opens the inventory at least twice (start + at least one more)."""
+        return self._end_meso
+
+    @property
     def meso_gained(self) -> int | None:
         """Net meso change over the session (end - start). None until BOTH
         endpoints exist -- one inventory opening isn't enough to diff

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from maple_analyzer.parser import find_meso_from_boxes
+from maple_analyzer.parser import find_meso_candidate, find_meso_from_boxes
 
 _DEJAVU = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 _BG = (10, 12, 18)
@@ -74,6 +74,20 @@ def test_only_stat_strip_digits_returns_none():
     # LV at its real screenshot position: y=1116 in a 1151-high client.
     boxes = [(488, 1116, 37, 23, "32")]
     assert find_meso_from_boxes(boxes, (2045, 1151)) is None
+
+
+def test_candidate_returns_box_and_value():
+    """find_meso_candidate returns the detected box too, so the overlay can
+    cache the position and re-read it with cheap recognition-only OCR."""
+    boxes = [
+        (100, 100, 75, 21, "154,821"),
+        (50, 50, 43, 18, "320"),
+    ]
+    found = find_meso_candidate(boxes, (1351, 800))
+    assert found is not None
+    x, y, w, h, value = found
+    assert value == 154_821
+    assert (x, y, w, h) == (100, 100, 75, 21)
 
 
 def test_absurd_digit_blob_rejected():

@@ -26,7 +26,9 @@ class Settings:
     show_eta: bool = True
     show_proj_exp: bool = True
     topmost: bool = True
-    scale_pct: int = 100
+    # Default window scale is 120% per user request (2026-08-24): the
+    # original 100% reads as too small on typical gaming displays.
+    scale_pct: int = 120
     language: Lang = "zh"
     # Whether the timer rolling over finalizes+commits to History and then
     # STOPS, vs. finalizing and immediately starting the next session (the

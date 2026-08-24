@@ -45,7 +45,8 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "kv_proj_exp": {"en": "Est. session EXP", "zh": "預估本次經驗值"},
     "kv_hp_loss": {"en": "HP loss", "zh": "HP 損失"},
     "kv_mp_loss": {"en": "MP loss", "zh": "MP 損失"},
-    "kv_meso_diff": {"en": "Meso", "zh": "楓幣"},
+    "kv_meso_start": {"en": "Start meso", "zh": "起始楓幣"},
+    "kv_meso_current": {"en": "Current meso", "zh": "當前楓幣"},
 
     "restart_button": {"en": "Restart Session", "zh": "重新開始"},
     "pause_button": {"en": "Pause", "zh": "暫停"},

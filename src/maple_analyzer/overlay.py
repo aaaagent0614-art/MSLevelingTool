@@ -52,7 +52,7 @@ from PIL import Image
 from .capture import PANEL_OBSCURED
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
-from .parser import StatSnapshot, find_meso_from_boxes, parse_fields
+from .parser import StatSnapshot, find_meso_candidate, parse_fields, parse_meso
 from .rate import Session, SessionSummary
 from .settings import Settings
 
@@ -109,6 +109,10 @@ SCALE_MAX_PCT = 150
 # background thread (see _try_read_meso), so the interval only sets how
 # often we LOOK, not how long the UI freezes. Every 5 ticks = ~2.5s.
 MESO_SCAN_INTERVAL_TICKS = 5
+# Consecutive empty reads from the cached meso box before dropping the
+# cache and re-running full-frame detection to relocate the counter
+# (it moves if the inventory window is dragged).
+MESO_BOX_MISS_LIMIT = 3
 
 # Live tab's Pause/Resume/Start + Restart button row -- see _apply_run_state.
 BUTTON_HEIGHT = 28
@@ -237,6 +241,10 @@ class OverlayApp:
         self._meso_scan_ticks = 0
         self._meso_scan_thread: threading.Thread | None = None
         self._meso_ocr: StatPanelOcr | None = None
+        # Cached meso counter position (fractions of the client frame) +
+        # consecutive-miss counter -- see _try_read_meso's fast path.
+        self._meso_box: tuple[float, float, float, float] | None = None
+        self._meso_box_misses = 0
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -434,31 +442,40 @@ class OverlayApp:
         add_stat_row(3, "exp", "EXP", EXP_COLOR, with_bar=True)
 
         # Session info: label | tabular value, same alignment discipline.
-        session_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
-        session_card.grid(row=2, column=0, sticky="ew", padx=2, pady=(0, 3))
-        session_card.grid_columnconfigure(0, weight=1)
-        session_card.grid_columnconfigure(1, weight=0)
-
+        # Split into two cards with clear spacing between blocks (per user
+        # request 2026-08-24): EXP block (start/diff/ETA/projection) and a
+        # losses+meso block (HP/MP loss, start/current meso).
         self._kv_rows: dict[str, tuple] = {}
 
-        def add_kv_row(row: int, key: str, i18n_key: str) -> None:
-            lbl = ctk.CTkLabel(session_card, text_color=INK_DIM, anchor="w")
+        def add_kv_row(card, row: int, key: str, i18n_key: str) -> None:
+            lbl = ctk.CTkLabel(card, text_color=INK_DIM, anchor="w")
             self._i18n(lbl, i18n_key, size=11, bold=False)
             lbl.grid(row=row, column=0, sticky="w", padx=(12, 6), pady=0)
-            value = ctk.CTkLabel(session_card, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
+            value = ctk.CTkLabel(card, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
             value.grid(row=row, column=1, sticky="e", padx=(6, 12), pady=0)
             self._kv_rows[key] = (lbl, value)
             self._value_labels[key] = value
 
-        add_kv_row(0, "startexp", "kv_start_exp")
-        add_kv_row(1, "expdiff", "kv_exp_diff")
-        add_kv_row(2, "eta", "kv_eta")
-        add_kv_row(3, "projexp", "kv_proj_exp")
-        add_kv_row(4, "hploss", "kv_hp_loss")
-        add_kv_row(5, "mploss", "kv_mp_loss")
-        # Meso row always exists; it just shows '--' until track_meso is on
-        # AND both inventory readings have landed (see Session.record_meso).
-        add_kv_row(6, "mesodiff", "kv_meso_diff")
+        exp_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
+        exp_card.grid(row=2, column=0, sticky="ew", padx=2, pady=(0, 6))
+        exp_card.grid_columnconfigure(0, weight=1)
+        exp_card.grid_columnconfigure(1, weight=0)
+        add_kv_row(exp_card, 0, "startexp", "kv_start_exp")
+        add_kv_row(exp_card, 1, "expdiff", "kv_exp_diff")
+        add_kv_row(exp_card, 2, "eta", "kv_eta")
+        add_kv_row(exp_card, 3, "projexp", "kv_proj_exp")
+
+        loss_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
+        loss_card.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 6))
+        loss_card.grid_columnconfigure(0, weight=1)
+        loss_card.grid_columnconfigure(1, weight=0)
+        add_kv_row(loss_card, 0, "hploss", "kv_hp_loss")
+        add_kv_row(loss_card, 1, "mploss", "kv_mp_loss")
+        # Meso rows always exist; they show '--' until track_meso is on AND
+        # the corresponding inventory readings have landed (see
+        # Session.record_meso).
+        add_kv_row(loss_card, 2, "mesostart", "kv_meso_start")
+        add_kv_row(loss_card, 3, "mesocurrent", "kv_meso_current")
 
         # Two buttons share one row: the left one cycles Pause/Resume/Start
         # depending on _run_state (see _on_pause_button_clicked), the right
@@ -466,7 +483,7 @@ class OverlayApp:
         # "stopped" state, where Start already covers beginning a new
         # session and a separate Restart would have nothing to restart from.
         button_row = ctk.CTkFrame(parent, fg_color="transparent")
-        button_row.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 2))
+        button_row.grid(row=4, column=0, sticky="ew", padx=2, pady=(0, 2))
         button_row.grid_columnconfigure(0, weight=1)
         button_row.grid_columnconfigure(1, weight=1)
 
@@ -710,7 +727,7 @@ class OverlayApp:
         visible_kv = {
             "startexp": True, "expdiff": True, "eta": s.show_eta,
             "projexp": s.show_proj_exp, "hploss": s.show_hp, "mploss": s.show_mp,
-            "mesodiff": s.track_meso,
+            "mesostart": s.track_meso, "mesocurrent": s.track_meso,
         }
         for key, (lbl, value) in self._kv_rows.items():
             for w in (lbl, value):
@@ -896,7 +913,40 @@ class OverlayApp:
                 if meso_ocr is None:
                     meso_ocr = StatPanelOcr()
                     self._meso_ocr = meso_ocr
-                meso = find_meso_from_boxes(meso_ocr.detect_text(frame), frame.size)
+
+                # Fast path: the counter's position was found before (it
+                # only moves if the inventory window is dragged). A cached
+                # box reads with recognition-only OCR (~15ms) instead of a
+                # full-frame detection scan (~600ms). After a few misses the
+                # cache is dropped and we relocate with detection.
+                box = getattr(self, "_meso_box", None)  # fractions of frame
+                if box is not None:
+                    fw, fh = frame.size
+                    x = int(box[0] * fw)
+                    y = int(box[1] * fh)
+                    w = max(1, int(box[2] * fw))
+                    h = max(1, int(box[3] * fh))
+                    try:
+                        meso = parse_meso(meso_ocr.read_field(frame.crop((x, y, x + w, y + h))))
+                    except Exception:
+                        meso = None
+                    if meso is not None:
+                        self._meso_box_misses = 0
+                    else:
+                        self._meso_box_misses = getattr(self, "_meso_box_misses", 0) + 1
+                        if self._meso_box_misses >= MESO_BOX_MISS_LIMIT:
+                            self._meso_box = None  # relocate on next round
+                        self.root.after(0, lambda: self._apply_meso_result(None))
+                        return
+                else:
+                    found = find_meso_candidate(meso_ocr.detect_text(frame), frame.size)
+                    if found is None:
+                        self.root.after(0, lambda: self._apply_meso_result(None))
+                        return
+                    x, y, w, h, meso = found
+                    fw, fh = frame.size
+                    self._meso_box = (x / fw, y / fh, w / fw, h / fh)
+                    self._meso_box_misses = 0
             except Exception:
                 meso = None
             self.root.after(0, lambda m=meso: self._apply_meso_result(m))
@@ -1299,23 +1349,24 @@ class OverlayApp:
             text=_fmt_loss(mp_loss), text_color=MP_COLOR if mp_loss > 0 else INK_FAINT
         )
 
-        # Meso is gold -- EXP_COLOR's amber is the closest existing token.
-        # Shows BOTH endpoints: "178,375 → +5,000" (start meso, then net
-        # delta; spending shows as a negative delta in red). While only the
-        # baseline is known, show "178,375 → …" to hint the end reading is
-        # still missing (open the inventory again before the session ends).
+        # Meso block: "起始楓幣" shows the session baseline; "當前楓幣" shows
+        # the latest reading with the net delta, e.g. "155 (+55)" (spending
+        # shows as a negative delta in red). Matches the EXP block's
+        # start/diff split per user request 2026-08-24.
         meso_start = self._session.start_meso
+        meso_end = self._session.end_meso
         meso = self._session.meso_gained
-        if meso is not None:
+        self._value_labels["mesostart"].configure(
+            text=f"{meso_start:,}" if meso_start is not None else "--", text_color=INK
+        )
+        if meso is not None and meso_end is not None:
             sign = "+" if meso >= 0 else "-"
-            text = f"{meso_start:,} → {sign}{abs(meso):,}" if meso_start is not None else f"{sign}{abs(meso):,}"
-            self._value_labels["mesodiff"].configure(
-                text=text, text_color=EXP_COLOR if meso >= 0 else HP_COLOR,
+            self._value_labels["mesocurrent"].configure(
+                text=f"{meso_end:,} ({sign}{abs(meso):,})",
+                text_color=EXP_COLOR if meso >= 0 else HP_COLOR,
             )
-        elif meso_start is not None:
-            self._value_labels["mesodiff"].configure(text=f"{meso_start:,} → …", text_color=INK)
         else:
-            self._value_labels["mesodiff"].configure(text="--", text_color=INK)
+            self._value_labels["mesocurrent"].configure(text="--", text_color=INK)
 
         # Pause/stop/calibration are user- or engine-driven states that take
         # priority over the activity-based idle/tracking read below -- e.g. a

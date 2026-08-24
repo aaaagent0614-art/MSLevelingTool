@@ -142,10 +142,12 @@ def parse_meso(text: str | None) -> int | None:
     return value
 
 
-def find_meso_from_boxes(
+def find_meso_candidate(
     boxes: list[tuple[int, int, int, int, str]], frame_size: tuple[int, int]
-) -> int | None:
-    """Pick the meso counter out of full-frame detection boxes.
+) -> tuple[int, int, int, int, int] | None:
+    """Pick the meso counter out of full-frame detection boxes and return
+    (x, y, w, h, value) -- the box so callers can cache the position for
+    cheap recognition-only re-reads, plus the parsed value.
 
     `boxes` are (x, y, w, h, text) from ocr.detect_text(). The meso counter
     is the largest pure-digit text blob on screen that is NOT in the bottom
@@ -155,7 +157,7 @@ def find_meso_from_boxes(
     window, below the item grid. None when nothing qualifies (inventory
     closed)."""
     fw, fh = frame_size
-    candidates: list[tuple[int, int, str]] = []
+    candidates: list[tuple[int, int, str, int, int, int, int]] = []
     for x, y, w, h, text in boxes:
         stripped = text.strip()
         if not _MESO_PURE_DIGIT_RE.match(stripped):
@@ -167,9 +169,21 @@ def find_meso_from_boxes(
             continue
         if int(digits) > _MESO_MAX:
             continue
-        candidates.append((len(digits), y, stripped))
+        candidates.append((len(digits), y, stripped, x, y, w, h))
     if not candidates:
         return None
     # Most digits wins; ties break toward the bottom of the screen.
     candidates.sort(key=lambda c: (c[0], c[1]))
-    return parse_meso(candidates[-1][2])
+    _, _, text, x, y, w, h = candidates[-1]
+    value = parse_meso(text)
+    if value is None:
+        return None
+    return x, y, w, h, value
+
+
+def find_meso_from_boxes(
+    boxes: list[tuple[int, int, int, int, str]], frame_size: tuple[int, int]
+) -> int | None:
+    """Value-only convenience over find_meso_candidate (see its docstring)."""
+    found = find_meso_candidate(boxes, frame_size)
+    return found[4] if found is not None else None
