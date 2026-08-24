@@ -155,7 +155,6 @@ class _StubApp:
     _on_restart_clicked = OverlayApp._on_restart_clicked
     _on_stop_clicked = OverlayApp._on_stop_clicked
     _on_pause_button_clicked = OverlayApp._on_pause_button_clicked
-    _detect_map_name_once = OverlayApp._detect_map_name_once
     _apply_run_state = OverlayApp._apply_run_state
     _on_delete_history_clicked = OverlayApp._on_delete_history_clicked
 

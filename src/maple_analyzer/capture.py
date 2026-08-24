@@ -361,17 +361,6 @@ class ManualScreenCapture:
         return {}
 
 
-def grab_region(region: tuple[int, int, int, int]) -> Image.Image:
-    """Grab an arbitrary screen rectangle via mss and return it as an RGB
-    PIL image. Used for the map-name OCR region (and anything else that reads
-    a user-marked screen box independent of the capture mode)."""
-    import mss
-
-    left, top, right, bottom = region
-    shot = mss.mss().grab({"left": left, "top": top, "width": right - left, "height": bottom - top})
-    return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-
-
 def get_capture(sample_path: str | Path | None = None) -> WindowCapture:
     if sample_path is not None:
         return StaticImageCapture(sample_path)

@@ -34,7 +34,7 @@ def settings_path() -> Path:
 
 # The only non-JSON-native fields are the (l, t, r, b) screen-region tuples,
 # which are stored as lists.
-_REGION_FIELDS = ("manual_stat_region", "manual_meso_region", "map_region")
+_REGION_FIELDS = ("manual_stat_region", "manual_meso_region")
 
 
 def save_settings(s: "Settings") -> None:
@@ -101,10 +101,7 @@ class Settings:
     manual_stat_region: tuple[int, int, int, int] | None = None  # (l, t, r, b) screen px
     manual_meso_region: tuple[int, int, int, int] | None = None
     use_manual: bool = False
-    # Map name (2026-08-24). The dashboard shows a "地圖" field: either typed
-    # by hand, or auto-filled by OCR when map_auto is on and map_region is
-    # marked (the map-name text on screen, e.g. the area banner). Auto is off
-    # by default per user request.
+    # Map name (2026-08-24). The dashboard shows a "地圖" field, typed by hand
+    # (click the value to edit). Auto-OCR fill was removed (2026-08-25) at the
+    # user's request -- the game's stylized banner font misread too often.
     map_name: str = ""
-    map_auto: bool = False
-    map_region: tuple[int, int, int, int] | None = None
