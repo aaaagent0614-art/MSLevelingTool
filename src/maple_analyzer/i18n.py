@@ -125,15 +125,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
         "en": "Please mark the manual positions first, or switch to auto.",
         "zh": "請先標記手動設定位置，或改為自動。",
     },
-    "settings_map": {"en": "MAP", "zh": "地圖"},
-    "settings_map_auto": {
-        "en": "Auto-fill map name", "zh": "自動帶入地圖名稱",
-    },
-    "settings_set_map_region": {
-        "en": "Mark map name position", "zh": "標記地圖位置",
-    },
-    "settings_map_region_set": {"en": "Map: set", "zh": "地圖：已設定"},
-    "settings_map_region_unset": {"en": "Map: not set", "zh": "地圖：未設定"},
+    "detect_button": {"en": "Detect", "zh": "辨識"},
     "region_selector_hint": {
         "en": "Drag to mark the area, release to confirm (Esc to cancel)",
         "zh": "拖曳框選範圍，放開滑鼠完成（Esc 取消）",

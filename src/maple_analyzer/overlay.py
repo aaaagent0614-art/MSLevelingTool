@@ -51,7 +51,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from .i18n import Lang, t
-from .ocr import MapNameOcr, StatPanelOcr
+from .ocr import StatPanelOcr
 from .parser import StatSnapshot, find_meso_candidate, find_meso_in_region, find_stat_fields, parse_fields, parse_meso
 from .rate import Session, SessionSummary
 from .settings import Settings, app_data_dir, load_settings, save_settings
@@ -341,9 +341,6 @@ class OverlayApp:
         self._locate_ticks = 0
         self._locate_thread: threading.Thread | None = None
         self._locate_ocr: StatPanelOcr | None = None
-        # Traditional-Chinese map-name OCR engine (see ocr.MapNameOcr) -- lazy
-        # so the extra model isn't loaded until map auto-fill is actually used.
-        self._map_ocr: MapNameOcr | None = None
         # Detected stat-field boxes as fractions of the client frame:
         # {'LV': (fx, fy, fw, fh), ...}. None until the locator has found
         # the panel (tick falls back to regions.FIELD_BOXES meanwhile).
@@ -407,6 +404,7 @@ class OverlayApp:
         self._build_settings_tab(self._tabview.tab(self._tab_names["settings"]))
         self._tabview.set(self._tab_names["live"])  # CTkTabview defaults to the last-added tab otherwise
         self._apply_visibility()
+        self._apply_detect_button_visibility()
         self._apply_run_state()
 
         # Rebuild the manual-region capture source from the persisted settings.
@@ -414,9 +412,8 @@ class OverlayApp:
         # starts with _manual_source=None, so _active_source() falls back to the
         # auto GameWindowCapture -- which can't read the game under a screen
         # magnifier, leaving the session stuck "calibrating" forever (the
-        # reported "按開始後一直顯示偵測中"). _rebuild_manual_source also primes
-        # _locate_ticks so the one-shot manual detection runs on the very first
-        # tick instead of waiting the normal 10-tick locate interval.
+        # reported "按開始後一直顯示偵測中"). The first tick then runs the
+        # one-shot manual detection inline (see _try_locate).
         self._rebuild_manual_source()
 
         self._tick()
@@ -501,7 +498,6 @@ class OverlayApp:
         # _append_history_card already picks up the new language/font.
         self._rebuild_history_cards()
         self._refresh_manual_status()
-        self._refresh_map_status()
 
         self._render(self._last)  # refreshes status pill / timer text immediately
 
@@ -529,6 +525,7 @@ class OverlayApp:
         strip.grid(row=0, column=0, sticky="ew", padx=2, pady=(2, 3))
         strip.grid_columnconfigure(0, weight=1)
         strip.grid_columnconfigure(1, weight=0)
+        strip.grid_columnconfigure(2, weight=0)
 
         self._status_pill = ctk.CTkLabel(
             strip, text=self._t("status_tracking"), corner_radius=999, fg_color=TRACK_BG,
@@ -545,6 +542,17 @@ class OverlayApp:
             text_color=INK, font=self._font(10, bold=True), padx=8, pady=2,
         )
         self._timer_label.grid(row=0, column=1, sticky="e")
+
+        # "辨識" button: re-runs the manual-mode detection of the marked stat
+        # region on demand (see _run_manual_detection). Only meaningful -- and
+        # therefore only shown -- when manual mode is on.
+        self._detect_button = ctk.CTkButton(
+            strip, text="", command=self._on_detect_clicked,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
+            corner_radius=999, height=22, width=48,
+        )
+        self._i18n(self._detect_button, "detect_button", size=10, bold=True)
+        self._detect_button.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
         # Stat grid: label | mini bar | tabular value, aligned via one grid
         # rather than independently left-justified label:value text. Labels
@@ -602,9 +610,8 @@ class OverlayApp:
         add_kv_row(exp_card, 1, "expdiff", "kv_exp_diff")
         add_kv_row(exp_card, 2, "eta", "kv_eta")
         add_kv_row(exp_card, 3, "projexp", "kv_proj_exp")
-        # Map name (editable): click the value to type; auto-filled when
-        # map_auto is on (see _detect_map_name_once). Uses a regular (non-
-        # mono) font because map names are CJK text.
+        # Map name (editable): click the value to type it by hand. Uses a
+        # regular (non-mono) font because map names are CJK text.
         map_lbl = ctk.CTkLabel(exp_card, text_color=INK_DIM, anchor="w")
         self._i18n(map_lbl, "kv_map", size=11, bold=False)
         map_lbl.grid(row=4, column=0, sticky="w", padx=(12, 6), pady=0)
@@ -854,37 +861,6 @@ class OverlayApp:
         self._manual_warning_label.pack(fill="x", padx=12, pady=(0, 5))
         self._refresh_manual_status()
 
-        # MAP: optional auto-filled map name -- mark where the map name appears
-        # on screen; with map_auto on it's OCR'd into the dashboard 地圖 field.
-        map_card = ctk.CTkFrame(scroll, fg_color=SURFACE, corner_radius=12)
-        map_card.pack(fill="x", padx=2, pady=(4, 2))
-
-        self._i18n(
-            ctk.CTkLabel(map_card, anchor="w", text_color=INK_DIM), "settings_map", size=11, bold=True
-        ).pack(fill="x", padx=12, pady=(5, 0))
-
-        self._map_auto_var = tk.BooleanVar(value=self._settings.map_auto)
-        self._i18n(ctk.CTkSwitch(
-            map_card, variable=self._map_auto_var, text_color=INK,
-            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
-            command=self._on_map_auto_changed,
-        ), "settings_map_auto", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 3))
-
-        self._map_region_button = ctk.CTkButton(
-            map_card, command=self._on_set_map_region,
-            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
-            corner_radius=9, height=28,
-        )
-        self._i18n(self._map_region_button, "settings_set_map_region", size=11, bold=True)
-        self._map_region_button.pack(fill="x", padx=12, pady=(0, 3))
-
-        self._map_status_label = ctk.CTkLabel(
-            map_card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT,
-            font=self._font(9, bold=False),
-        )
-        self._map_status_label.pack(fill="x", padx=12, pady=(0, 5))
-        self._refresh_map_status()
-
     # ---- settings callbacks ------------------------------------------------
 
     def _on_scale_step(self, delta: int) -> None:
@@ -1018,27 +994,14 @@ class OverlayApp:
             return [self._t("settings_manual_detected", n=len(self._stat_boxes))]
         return [self._t("settings_manual_detect_failed")]
 
-    def _refresh_map_status(self) -> None:
-        """Update the map-region status line (set + coords, or unset)."""
-        region = self._settings.map_region
-        if region is None:
-            text = self._t("settings_map_region_unset")
+    def _apply_detect_button_visibility(self) -> None:
+        """The 辨識 button only makes sense in manual mode -- hide it otherwise."""
+        if getattr(self, "_detect_button", None) is None:
+            return
+        if self._settings.use_manual:
+            self._detect_button.grid()
         else:
-            l, t, r, b = region
-            text = f"{self._t('settings_map_region_set')} ({l},{t})-({r},{b})"
-        self._map_status_label.configure(text=text)
-
-    def _on_map_auto_changed(self) -> None:
-        self._settings.map_auto = self._map_auto_var.get()
-        self._persist_settings()
-
-    def _on_set_map_region(self) -> None:
-        self._select_region(self._on_map_region_selected, "settings_set_map_region")
-
-    def _on_map_region_selected(self, region) -> None:
-        self._settings.map_region = region
-        self._refresh_map_status()
-        self._persist_settings()
+            self._detect_button.grid_remove()
 
     def _on_map_edit(self) -> None:
         with self._modal():
@@ -1056,6 +1019,7 @@ class OverlayApp:
         self._settings.use_manual = self._use_manual_var.get()
         self._rebuild_manual_source()
         self._refresh_manual_status()
+        self._apply_detect_button_visibility()
         self._persist_settings()
 
     def _on_set_stat_region(self) -> None:
@@ -1249,26 +1213,30 @@ class OverlayApp:
         return max(0, int(TARGET_MS - elapsed_ms))
 
     def _try_locate(self) -> None:
-        """Kick off a background locator pass (throttled to
-        LOCATE_INTERVAL_TICKS).
+        """Locate the stat panel + meso counter.
 
-        Full-frame *detection* OCR (~600ms) finds BOTH the stat panel
-        fields (LV/HP/MP/EXP by their text patterns) and the meso counter,
-        then caches their positions as frame fractions. The tick thread
-        only ever does cheap recognition reads on those cached boxes, so
-        the HUD stays correct even when a screen magnifier (Megapipe)
-        rescales the layout -- the detected positions track the magnified
-        frame every pass. Runs on a daemon thread so the UI never blocks;
-        Tk is only touched via root.after."""
+        Manual mode: a one-shot *synchronous* detection of the user-marked
+        region, run inline on the main thread. The previous design ran it on a
+        daemon thread and delivered the result via root.after(), which is not
+        reliably thread-safe -- when that callback failed to fire, the HUD sat
+        stuck "偵測中" forever after a relaunch. Inline detection reuses the
+        main OCR engine (already loaded) and lands deterministically; it runs
+        once (guarded by _manual_calibrated) so the ~600ms cost is paid a
+        single time.
+
+        Auto mode: the original throttled background pass (unchanged), which
+        re-finds the panel on the full frame so reads stay correct under a
+        screen magnifier (Magpie).
+        """
+        if self._settings.use_manual:
+            if not self._manual_calibrated and self._settings.manual_stat_region is not None:
+                self._run_manual_detection()
+            return
+
         self._locate_ticks = getattr(self, "_locate_ticks", 0) + 1
         if self._locate_ticks < LOCATE_INTERVAL_TICKS:
             return
         self._locate_ticks = 0
-        # Manual mode: detection runs ONCE to subdivide the marked stat
-        # region, then stops -- the region is fixed, and re-detecting every
-        # ~5s was what spiked the CPU and dropped the game's frames.
-        if self._settings.use_manual and getattr(self, "_manual_calibrated", False):
-            return
         _thread = getattr(self, "_locate_thread", None)
         if _thread is not None and _thread.is_alive():
             return  # previous pass still running -- skip this round
@@ -1284,59 +1252,31 @@ class OverlayApp:
                     locate_ocr = StatPanelOcr()
                     self._locate_ocr = locate_ocr
 
-                s = self._settings
-                if s.use_manual and s.manual_stat_region is not None:
-                    # Manual mode: OCR the user-marked screen rectangles
-                    # directly (see ManualScreenCapture). The stat region is
-                    # subdivided by detection; the meso region is read
-                    # separately. Fresh capture on THIS thread.
-                    from .capture import ManualScreenCapture
+                # Auto mode: fresh capture on THIS thread. The shared
+                # mss/win32 handles live on the tick thread, and re-entering
+                # them from a second thread risks races. A new
+                # GameWindowCapture is cheap (one EnumWindows + one grab). On
+                # non-Windows (dev/tests) the shared source is a pure-PIL
+                # stand-in, safe to reuse.
+                if sys.platform == "win32":
+                    from .capture import GameWindowCapture
 
-                    cap = ManualScreenCapture(s.manual_stat_region, s.manual_meso_region)
-                    frame = cap.grab_full()
-                    boxes = locate_ocr.detect_text(frame)
-                    stat = find_stat_fields(boxes)
-                    fw, fh = frame.size
-                    stat_frac = {
-                        name: (x / fw, y / fh, w / fw, h / fh)
-                        for name, (x, y, w, h) in stat.items()
-                    }
-                    meso_frac = None
-                    meso_value = None
-                    if s.manual_meso_region is not None:
-                        meso_frame = cap.grab_meso()
-                        mboxes = locate_ocr.detect_text(meso_frame)
-                        meso_found = find_meso_in_region(mboxes)
-                        if meso_found is not None:
-                            x, y, w, h, meso_value = meso_found
-                            mw, mh = meso_frame.size
-                            meso_frac = (x / mw, y / mh, w / mw, h / mh)
+                    frame = GameWindowCapture().grab_full()
                 else:
-                    # Auto mode: fresh capture on THIS thread. The shared
-                    # mss/win32 handles live on the tick thread, and
-                    # re-entering them from a second thread risks races. A new
-                    # GameWindowCapture is cheap (one EnumWindows + one grab).
-                    # On non-Windows (dev/tests) the shared source is a
-                    # pure-PIL stand-in, safe to reuse.
-                    if sys.platform == "win32":
-                        from .capture import GameWindowCapture
-
-                        frame = GameWindowCapture().grab_full()
-                    else:
-                        frame = self._source.grab_full()
-                    boxes = locate_ocr.detect_text(frame)
-                    stat = find_stat_fields(boxes)
-                    meso_found = find_meso_candidate(boxes, frame.size)
-                    fw, fh = frame.size
-                    stat_frac = {
-                        name: (x / fw, y / fh, w / fw, h / fh)
-                        for name, (x, y, w, h) in stat.items()
-                    }
-                    meso_frac = None
-                    meso_value = None
-                    if meso_found is not None:
-                        x, y, w, h, meso_value = meso_found
-                        meso_frac = (x / fw, y / fh, w / fw, h / fh)
+                    frame = self._source.grab_full()
+                boxes = locate_ocr.detect_text(frame)
+                stat = find_stat_fields(boxes)
+                meso_found = find_meso_candidate(boxes, frame.size)
+                fw, fh = frame.size
+                stat_frac = {
+                    name: (x / fw, y / fh, w / fw, h / fh)
+                    for name, (x, y, w, h) in stat.items()
+                }
+                meso_frac = None
+                meso_value = None
+                if meso_found is not None:
+                    x, y, w, h, meso_value = meso_found
+                    meso_frac = (x / fw, y / fh, w / fw, h / fh)
             except Exception:
                 stat_frac, meso_frac, meso_value = {}, None, None
             self.root.after(
@@ -1346,6 +1286,50 @@ class OverlayApp:
 
         self._locate_thread = threading.Thread(target=_locate, daemon=True)
         self._locate_thread.start()
+
+    def _run_manual_detection(self) -> None:
+        """One-shot manual-mode detection, run synchronously on the main thread.
+
+        Subdivides the marked stat region into LV/HP/MP/EXP via detection OCR
+        and finds the meso counter in the marked meso region. Reuses the main
+        OCR engine -- safe because this runs on the main thread, so there is no
+        concurrency with the per-tick recognition reads. Also the "辨識"
+        button's action, so a stuck/incorrect auto-detection can always be
+        re-triggered by hand.
+        """
+        s = self._settings
+        if not (s.use_manual and s.manual_stat_region is not None):
+            return
+        self._manual_calibrated = False
+        self._refresh_manual_status()  # surface "偵測中…" before the blocking pass
+        stat_frac, meso_frac, meso_value = {}, None, None
+        try:
+            from .capture import ManualScreenCapture
+
+            cap = ManualScreenCapture(s.manual_stat_region, s.manual_meso_region)
+            frame = cap.grab_full()
+            boxes = self._ocr.detect_text(frame)
+            stat = find_stat_fields(boxes)
+            fw, fh = frame.size
+            stat_frac = {
+                name: (x / fw, y / fh, w / fw, h / fh)
+                for name, (x, y, w, h) in stat.items()
+            }
+            if s.manual_meso_region is not None:
+                meso_frame = cap.grab_meso()
+                mboxes = self._ocr.detect_text(meso_frame)
+                meso_found = find_meso_in_region(mboxes)
+                if meso_found is not None:
+                    x, y, w, h, meso_value = meso_found
+                    mw, mh = meso_frame.size
+                    meso_frac = (x / mw, y / mh, w / mw, h / mh)
+        except Exception:
+            stat_frac, meso_frac, meso_value = {}, None, None
+        self._apply_locate(stat_frac, meso_frac, meso_value)
+
+    def _on_detect_clicked(self) -> None:
+        """Manual "辨識" button: force a fresh detection of the marked regions."""
+        self._run_manual_detection()
 
     def _apply_locate(
         self,
@@ -1398,40 +1382,6 @@ class OverlayApp:
             value = parse_meso(text)
             if value is not None:
                 self._session.record_meso(value)
-                self._render(self._last)
-        except Exception:
-            pass
-
-    def _detect_map_name_once(self) -> None:
-        """One-shot map-name OCR at session start (map_auto only). The map does
-        not change mid-session, so there's no need to keep re-reading it.
-
-        Only auto-fills an EMPTY map field: OCR can still misread stylized
-        banner text, and overwriting a manually-corrected name with a bad read
-        every session was the reported pain point. Once a name is set (by hand
-        or a good OCR) it sticks until the user clears it in the field, which
-        re-arms auto-fill for the next session.
-        """
-        s = self._settings
-        if not (s.map_auto and s.map_region is not None):
-            return
-        if s.map_name:
-            return  # already set -- don't clobber a manual correction with bad OCR
-        try:
-            from .capture import grab_region
-
-            img = grab_region(s.map_region)
-            # Traditional-Chinese OCR (see ocr.MapNameOcr): the Simplified
-            # stat-panel model's dictionary lacks 螞/蟻/…, so map names need a
-            # dedicated `chinese_cht` engine. Lazy-inited on first use.
-            map_ocr = self._map_ocr
-            if map_ocr is None:
-                map_ocr = MapNameOcr()
-                self._map_ocr = map_ocr
-            text = (map_ocr.read_map_name(img) or "").strip()
-            if text and text != s.map_name:
-                s.map_name = text
-                self._persist_settings()
                 self._render(self._last)
         except Exception:
             pass
@@ -1507,14 +1457,12 @@ class OverlayApp:
             self._apply_run_state()
         else:
             self._session.start()
-            self._detect_map_name_once()
 
     def _on_restart_clicked(self) -> None:
         if self._settings.save_on_restart:
             self._commit_session_to_history()
         self._session.start()  # resets pause state too, so a restart from "paused" lands in "running"
         self._run_state = "running"
-        self._detect_map_name_once()
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
@@ -1550,7 +1498,6 @@ class OverlayApp:
                 return
             self._session.start()
             self._run_state = "running"
-            self._detect_map_name_once()
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
