@@ -16,7 +16,7 @@ from typing import Literal
 Lang = Literal["en", "zh"]
 
 _STRINGS: dict[str, dict[Lang, str]] = {
-    "tab_live": {"en": "Live", "zh": "即時"},
+    "tab_live": {"en": "Dashboard", "zh": "儀錶板"},
     "tab_history": {"en": "History", "zh": "紀錄"},
     "tab_settings": {"en": "Settings", "zh": "設定"},
 
@@ -50,6 +50,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "restart_button": {"en": "Restart Session", "zh": "重新開始"},
     "pause_button": {"en": "Pause", "zh": "暫停"},
     "resume_button": {"en": "Resume", "zh": "繼續"},
+    "stop_button": {"en": "Stop", "zh": "停止"},
     "start_button": {"en": "Start Session", "zh": "開始"},
 
     "history_empty": {"en": "No sessions yet", "zh": "尚無紀錄"},

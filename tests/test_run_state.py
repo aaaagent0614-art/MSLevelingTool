@@ -114,6 +114,7 @@ class _StubApp:
         self._timer_label = _StubWidget()
         self._pause_button = _StubWidget()
         self._restart_button = _StubWidget()
+        self._stop_button = _StubWidget()
         self._value_labels: dict = defaultdict(_StubWidget)
         self._bars: dict = defaultdict(_StubWidget)
 
@@ -145,6 +146,7 @@ class _StubApp:
     _commit_session_to_history = OverlayApp._commit_session_to_history
     _finalize_and_maybe_stop = OverlayApp._finalize_and_maybe_stop
     _on_restart_clicked = OverlayApp._on_restart_clicked
+    _on_stop_clicked = OverlayApp._on_stop_clicked
     _on_pause_button_clicked = OverlayApp._on_pause_button_clicked
     _apply_run_state = OverlayApp._apply_run_state
     _on_delete_history_clicked = OverlayApp._on_delete_history_clicked
@@ -203,6 +205,21 @@ def test_pause_button_cycles_running_paused_running():
     app._on_pause_button_clicked()  # paused -> running
     assert app._run_state == "running"
     assert app._pause_button.cget("text") == app._t("pause_button")
+
+
+def test_stop_ends_session_without_starting_a_new_one():
+    app = _StubApp()
+    app._on_pause_button_clicked()  # stopped -> running
+    _calibrate(app, gains=(100,))
+    app._session._start_time -= 2  # ensure elapsed >= 1s so stop commits
+    app._on_pause_button_clicked()  # running -> paused
+    assert app._run_state == "paused"
+    app._on_stop_clicked()
+    assert app._run_state == "stopped"
+    assert len(app._session_history) == 1  # committed, unlike a throwaway pause
+    assert app._pause_button.cget("text") == app._t("start_button")
+    # The session clock is frozen (paused), not rolled into a fresh session.
+    assert app._session.is_calibrating is False
 
 
 # --- auto-stop (default on) -----------------------------------------------

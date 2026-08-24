@@ -587,15 +587,16 @@ class OverlayApp:
         add_kv_row(loss_card, 2, "mesostart", "kv_meso_start")
         add_kv_row(loss_card, 3, "mesocurrent", "kv_meso_current")
 
-        # Two buttons share one row: the left one cycles Pause/Resume/Start
-        # depending on _run_state (see _on_pause_button_clicked), the right
-        # one is the unconditional manual Restart -- hidden only in the
-        # "stopped" state, where Start already covers beginning a new
-        # session and a separate Restart would have nothing to restart from.
+        # Three buttons share one row: the left cycles Pause/Resume/Start
+        # (see _on_pause_button_clicked), the middle is Stop -- only shown
+        # while paused, and ends the session WITHOUT starting a new one (the
+        # one thing the right button, unconditional Restart, can't do), the
+        # right is Restart. Stop and Restart are hidden while stopped.
         button_row = ctk.CTkFrame(parent, fg_color="transparent")
         button_row.grid(row=4, column=0, sticky="ew", padx=2, pady=(0, 2))
         button_row.grid_columnconfigure(0, weight=1)
         button_row.grid_columnconfigure(1, weight=1)
+        button_row.grid_columnconfigure(2, weight=1)
 
         self._pause_button = ctk.CTkButton(
             button_row, command=self._on_pause_button_clicked,
@@ -604,13 +605,21 @@ class OverlayApp:
         )
         self._pause_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
 
+        self._stop_button = ctk.CTkButton(
+            button_row, command=self._on_stop_clicked,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=HP_COLOR,
+            corner_radius=9, height=BUTTON_HEIGHT,
+        )
+        self._i18n(self._stop_button, "stop_button", size=12, bold=True)
+        self._stop_button.grid(row=0, column=1, sticky="ew", padx=(0, 3))
+
         self._restart_button = ctk.CTkButton(
             button_row, command=self._on_restart_clicked,
             fg_color=ACCENT, text_color=ACCENT_INK, hover_color="#7ff2e0",
             corner_radius=9, height=BUTTON_HEIGHT,
         )
         self._i18n(self._restart_button, "restart_button", size=13, bold=True)
-        self._restart_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self._restart_button.grid(row=0, column=2, sticky="ew", padx=(3, 0))
 
     def _build_history_tab(self, parent) -> None:
         self._clear_history_button = ctk.CTkButton(
@@ -1318,6 +1327,18 @@ class OverlayApp:
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
+    def _on_stop_clicked(self) -> None:
+        # End the session WITHOUT starting a new one: commit to history, freeze
+        # the session clock, and land in "stopped" (Start becomes the next
+        # action). Mirrors the auto-stop branch of _finalize_and_maybe_stop;
+        # unlike Restart it always commits (not gated on save_on_restart), the
+        # same as the timer-driven auto-stop.
+        self._commit_session_to_history()
+        self._session.pause()
+        self._run_state = "stopped"
+        self._apply_run_state()
+        self._render(self._last)  # immediate feedback, don't wait for next tick
+
     def _on_pause_button_clicked(self) -> None:
         """One button, three roles depending on _run_state -- see
         _apply_run_state for how its label/command follow that state."""
@@ -1336,19 +1357,25 @@ class OverlayApp:
     def _apply_run_state(self) -> None:
         label_key = {"running": "pause_button", "paused": "resume_button", "stopped": "start_button"}[self._run_state]
         self._pause_button.configure(text=self._t(label_key), font=self._font(12, bold=True))
-        # A Restart with nothing running/paused to restart from doesn't mean
-        # anything -- Start (the pause button's role while stopped) already
-        # covers beginning the next session. As the sole button in the row
-        # it's centered and shrunk rather than stretched across both
-        # columns the way the two-button running/paused layout is.
+        # Stopped: Start is the only meaningful action -- Restart/Stop have
+        # nothing to act on. As the sole button it's centered and shrunk.
         if self._run_state == "stopped":
             self._restart_button.grid_remove()
+            self._stop_button.grid_remove()
             self._pause_button.configure(width=STOPPED_BUTTON_WIDTH, height=BUTTON_HEIGHT)
-            self._pause_button.grid(row=0, column=0, columnspan=2, sticky="", padx=0)
-        else:
-            self._pause_button.configure(width=140, height=BUTTON_HEIGHT)  # CTkButton's own default width
+            self._pause_button.grid(row=0, column=0, columnspan=3, sticky="", padx=0)
+        elif self._run_state == "paused":
+            # Paused: Resume / Stop / Restart all three. Stop is the way to end
+            # the session without immediately starting the next one.
+            self._pause_button.configure(width=140, height=BUTTON_HEIGHT)
             self._pause_button.grid(row=0, column=0, columnspan=1, sticky="ew", padx=(0, 3))
-            self._restart_button.grid(row=0, column=1, columnspan=1, sticky="ew", padx=(3, 0))
+            self._stop_button.grid(row=0, column=1, columnspan=1, sticky="ew", padx=(0, 3))
+            self._restart_button.grid(row=0, column=2, columnspan=1, sticky="ew", padx=(3, 0))
+        else:  # running
+            self._pause_button.configure(width=140, height=BUTTON_HEIGHT)
+            self._pause_button.grid(row=0, column=0, columnspan=1, sticky="ew", padx=(0, 3))
+            self._stop_button.grid_remove()
+            self._restart_button.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(3, 0))
 
     def _rebuild_history_cards(self) -> None:
         for card in self._history_cards:
