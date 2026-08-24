@@ -141,6 +141,7 @@ class _StubApp:
     _render = OverlayApp._render
     _update_timer_label = OverlayApp._update_timer_label
     _maybe_finalize_on_timeout = OverlayApp._maybe_finalize_on_timeout
+    _maybe_refresh_manual_meso = OverlayApp._maybe_refresh_manual_meso
     _commit_session_to_history = OverlayApp._commit_session_to_history
     _finalize_and_maybe_stop = OverlayApp._finalize_and_maybe_stop
     _on_restart_clicked = OverlayApp._on_restart_clicked

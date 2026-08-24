@@ -51,9 +51,24 @@ from PIL import Image
 
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
-from .parser import StatSnapshot, find_meso_candidate, find_meso_in_region, find_stat_fields, parse_fields
+from .parser import StatSnapshot, find_meso_candidate, find_meso_in_region, find_stat_fields, parse_fields, parse_meso
 from .rate import Session, SessionSummary
 from .settings import Settings
+
+
+def _open_log_file():
+    """Return a writable stream for the windowed (console=False) build's debug
+    logging: a real file next to the exe instead of devnull, so the per-tick
+    OCR readout can be inspected to diagnose bad recognition."""
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base = os.getcwd()
+    path = os.path.join(base, "MSLevelingTool.log")
+    try:
+        return open(path, "a", encoding="utf-8", errors="replace")
+    except OSError:
+        return open(os.devnull, "w", encoding="utf-8", errors="replace")
 
 # The console's codepage (e.g. cp950 Traditional Chinese) can't represent
 # every character OCR might misread out of the game's UI -- printing one
@@ -75,9 +90,7 @@ if sys.stdout is None:
     # printing one raised UnicodeEncodeError straight through the sink,
     # killing the tick loop. Same errors="replace" the console path below
     # has always had; the windowed build was the only place missing it.
-    sys.stdout = sys.stderr = open(
-        os.devnull, "w", encoding="utf-8", errors="replace"
-    )
+    sys.stdout = sys.stderr = _open_log_file()
 else:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if sys.stderr is not None:
@@ -113,6 +126,10 @@ LOCATE_INTERVAL_TICKS = 10
 # falling back to the fixed regions.FIELD_BOXES (transient OCR misses
 # shouldn't flap the tick between detected and fixed boxes).
 LOCATE_EMPTY_LIMIT = 3
+# How often (in ticks) manual mode re-reads the meso counter via cheap
+# recognition-only OCR on the marked meso region (~15ms) -- no detection, so
+# no CPU spike like the locator's periodic detection pass used to cause.
+MESO_SCAN_INTERVAL_TICKS = 10
 
 # Live tab's Pause/Resume/Start + Restart button row -- see _apply_run_state.
 BUTTON_HEIGHT = 28
@@ -329,6 +346,8 @@ class OverlayApp:
         # when the user marks regions and toggles manual mode on, and used by
         # _active_source() in place of the auto GameWindowCapture.
         self._manual_source = None
+        self._manual_calibrated = False
+        self._meso_scan_ticks = 0
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -839,6 +858,11 @@ class OverlayApp:
             self._manual_source = ManualScreenCapture(s.manual_stat_region, s.manual_meso_region)
         else:
             self._manual_source = None
+        # Regions/toggle changed: invalidate the one-shot calibration and force
+        # the next tick to re-run detection immediately.
+        self._manual_calibrated = False
+        self._stat_boxes = None
+        self._locate_ticks = LOCATE_INTERVAL_TICKS
 
     def _active_source(self):
         """The capture source for this tick/locate pass: the manual screen
@@ -859,7 +883,19 @@ class OverlayApp:
         self._manual_status_label.configure(text="\n".join([
             line(s.manual_stat_region, "settings_stat_region_set", "settings_stat_region_unset"),
             line(s.manual_meso_region, "settings_meso_region_set", "settings_meso_region_unset"),
+            *self._manual_feedback_lines(),
         ]))
+
+    def _manual_feedback_lines(self) -> list[str]:
+        """One extra status line describing the manual-mode detection result,
+        so the user knows right away whether their marked box is good."""
+        if not (self._settings.use_manual and self._settings.manual_stat_region is not None):
+            return []
+        if not self._manual_calibrated:
+            return [self._t("settings_manual_detecting")]
+        if self._stat_boxes:
+            return [self._t("settings_manual_detected", n=len(self._stat_boxes))]
+        return [self._t("settings_manual_detect_failed")]
 
     def _on_use_manual_changed(self) -> None:
         self._settings.use_manual = self._use_manual_var.get()
@@ -1049,6 +1085,7 @@ class OverlayApp:
         self._maybe_finalize_on_timeout()
 
         self._render(merged)
+        self._maybe_refresh_manual_meso()
         elapsed_ms = (time.perf_counter() - t0) * 1000
         return max(0, int(TARGET_MS - elapsed_ms))
 
@@ -1068,6 +1105,11 @@ class OverlayApp:
         if self._locate_ticks < LOCATE_INTERVAL_TICKS:
             return
         self._locate_ticks = 0
+        # Manual mode: detection runs ONCE to subdivide the marked stat
+        # region, then stops -- the region is fixed, and re-detecting every
+        # ~5s was what spiked the CPU and dropped the game's frames.
+        if self._settings.use_manual and getattr(self, "_manual_calibrated", False):
+            return
         _thread = getattr(self, "_locate_thread", None)
         if _thread is not None and _thread.is_alive():
             return  # previous pass still running -- skip this round
@@ -1170,6 +1212,36 @@ class OverlayApp:
             if self._run_state == "running" and meso_value is not None:
                 self._session.record_meso(meso_value)
                 self._render(self._last)  # show the updated meso rows promptly
+
+        if self._settings.use_manual:
+            # One-shot manual calibration complete (success or not -- don't
+            # retry every 5s and keep dropping the game's frames). The user
+            # sees the result in the settings status line and can re-mark.
+            self._manual_calibrated = True
+            self._refresh_manual_status()
+
+    def _maybe_refresh_manual_meso(self) -> None:
+        """Manual-mode meso read: cheap recognition-only OCR on the marked
+        meso region every MESO_SCAN_INTERVAL_TICKS (~15ms, no detection). The
+        locator no longer runs periodically in manual mode, so this is what
+        keeps the meso counter fresh when the user opens the inventory."""
+        if not (self._settings.use_manual and self._manual_source is not None
+                and self._settings.manual_meso_region is not None
+                and self._settings.track_meso and self._run_state == "running"):
+            return
+        self._meso_scan_ticks += 1
+        if self._meso_scan_ticks < MESO_SCAN_INTERVAL_TICKS:
+            return
+        self._meso_scan_ticks = 0
+        try:
+            img = self._manual_source.grab_meso()
+            text = self._ocr.read_field(img)
+            value = parse_meso(text)
+            if value is not None:
+                self._session.record_meso(value)
+                self._render(self._last)
+        except Exception:
+            pass
 
     def _update_timer_label(self) -> None:
         """Split out of _render so the capture-error path in _do_tick can

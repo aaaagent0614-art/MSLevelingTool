@@ -110,6 +110,13 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "settings_stat_region_unset": {"en": "Status bar: not set", "zh": "狀態列：未設定"},
     "settings_meso_region_set": {"en": "Meso: set", "zh": "楓幣：已設定"},
     "settings_meso_region_unset": {"en": "Meso: not set", "zh": "楓幣：未設定"},
+    "settings_manual_detecting": {"en": "Detecting status bar…", "zh": "狀態列偵測中…"},
+    "settings_manual_detected": {
+        "en": "Status bar: {n}/4 fields found", "zh": "狀態列：偵測到 {n}/4 個欄位",
+    },
+    "settings_manual_detect_failed": {
+        "en": "Status bar: detection failed, re-mark it", "zh": "狀態列：偵測失敗，請重新框選",
+    },
     "region_selector_hint": {
         "en": "Drag to mark the area, release to confirm (Esc to cancel)",
         "zh": "拖曳框選範圍，放開滑鼠完成（Esc 取消）",
