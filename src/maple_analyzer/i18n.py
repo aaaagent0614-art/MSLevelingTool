@@ -22,7 +22,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
 
     "status_tracking": {"en": "Tracking", "zh": "追蹤中"},
     "status_idle": {"en": "Idle", "zh": "閒置"},
-    "status_calibrating": {"en": "Calibrating…", "zh": "校準中…"},
+    "status_calibrating": {"en": "Detecting…", "zh": "偵測中…"},
     "status_paused": {"en": "Paused", "zh": "已暫停"},
     "status_stopped": {"en": "Stopped", "zh": "已停止"},
     "timer_left": {"en": "{time} left", "zh": "剩餘 {time}"},
@@ -114,7 +114,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "settings_stat_region_unset": {"en": "Status bar: not set", "zh": "狀態列：未設定"},
     "settings_meso_region_set": {"en": "Meso: set", "zh": "楓幣：已設定"},
     "settings_meso_region_unset": {"en": "Meso: not set", "zh": "楓幣：未設定"},
-    "settings_manual_detecting": {"en": "Detecting status bar…", "zh": "狀態列偵測中…"},
+    "settings_manual_detecting": {"en": "Detecting…", "zh": "偵測中…"},
     "settings_manual_detected": {
         "en": "Status bar: {n}/4 fields found", "zh": "狀態列：偵測到 {n}/4 個欄位",
     },
@@ -125,7 +125,23 @@ _STRINGS: dict[str, dict[Lang, str]] = {
         "en": "Please mark the manual positions first, or switch to auto.",
         "zh": "請先標記手動設定位置，或改為自動。",
     },
+    "screen_changed_prompt": {
+        "en": "Screen resolution changed. Your marked positions may be off — please re-mark them.",
+        "zh": "螢幕解析度已改變，標記位置可能已跑掉，請重新標記。",
+    },
     "detect_button": {"en": "Detect", "zh": "辨識"},
+    "detect_result_ok": {"en": "Detected {n}/4 fields", "zh": "偵測到 {n}/4 欄位"},
+    "detect_result_fail": {"en": "Detection failed — re-mark it", "zh": "偵測失敗，請重新標記"},
+    "update_available": {"en": "New version v{ver} available", "zh": "有新版本 v{ver} 可下載"},
+    "meso_hint": {"en": "Meso: press I to open inventory", "zh": "楓幣：按 I 開啟道具欄讀取"},
+    "settings_notify_on_stop": {"en": "Alert when a session ends", "zh": "紀錄結束時提醒（音效）"},
+    "history_summary_count": {"en": "{n} sessions", "zh": "共 {n} 筆紀錄"},
+    "history_summary_today": {"en": "Today +{exp} EXP", "zh": "今日經驗值 +{exp}"},
+    "history_summary_avg": {"en": "Avg {rate} EXP/min", "zh": "平均 {rate} EXP/分"},
+    "history_cleanup_hint": {
+        "en": "{n} sessions — consider cleaning up old ones",
+        "zh": "已累積 {n} 筆紀錄，建議定期整理（刪除不用的）",
+    },
     "region_selector_hint": {
         "en": "Drag to mark the area, release to confirm (Esc to cancel)",
         "zh": "拖曳框選範圍，放開滑鼠完成（Esc 取消）",

@@ -50,10 +50,12 @@ from typing import Protocol
 import customtkinter as ctk
 from PIL import Image
 
+from . import __version__
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, find_meso_candidate, find_meso_in_region, find_stat_fields, parse_fields, parse_meso
 from .rate import Session, SessionSummary
+from .region_selector import RegionSelector
 from .settings import Settings, app_data_dir, load_settings, save_settings
 
 
@@ -138,6 +140,10 @@ LOCATE_EMPTY_LIMIT = 3
 # no CPU spike like the locator's periodic detection pass used to cause.
 MESO_SCAN_INTERVAL_TICKS = 10
 
+# Number of history sessions at which the History tab starts nudging the user
+# to clean up old records (see _update_history_summary).
+_HISTORY_CLEANUP_THRESHOLD = 50
+
 # Live tab's Pause/Resume/Start + Restart button row -- see _apply_run_state.
 BUTTON_HEIGHT = 28
 STOPPED_BUTTON_WIDTH = 96  # Start alone, centered -- smaller than the two-button width
@@ -221,77 +227,12 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
     )
 
 
-class _RegionSelector:
-    """Fullscreen, semi-transparent, topmost overlay for marking a screen
-    rectangle by dragging the mouse. On release it stores the rectangle in
-    screen pixels on `.result` and destroys itself; Esc cancels (result stays
-    None). The caller blocks on `root.wait_window(selector.top)` and then
-    reads `.result`."""
-
-    def __init__(self, root, title: str, hint: str):
-        self.result: tuple[int, int, int, int] | None = None
-        self.top = tk.Toplevel(root)
-        self.top.title(title)
-        self.top.attributes("-fullscreen", True)
-        self.top.attributes("-topmost", True)
-        # ~25% opaque: the game shows through dimmed, and the red selection
-        # rectangle stays visible on top.
-        self.top.attributes("-alpha", 0.25)
-        self.top.configure(bg="black", cursor="crosshair")
-        self._canvas = tk.Canvas(self.top, bg="black", highlightthickness=0, cursor="crosshair")
-        self._canvas.pack(fill="both", expand=True)
-        self._start: tuple[int, int] | None = None
-        self._rect_id: int | None = None
-        self.top.update_idletasks()
-        self._canvas.create_text(
-            self._canvas.winfo_width() // 2, 40, anchor="n", fill="#ffcc00",
-            text=f"{title}\n{hint}", font=("Microsoft JhengHei", 18, "bold"),
-        )
-        self._canvas.bind("<ButtonPress-1>", self._on_press)
-        self._canvas.bind("<B1-Motion>", self._on_drag)
-        self._canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.top.bind("<Escape>", lambda _e: self._finish(None))
-        try:
-            self.top.grab_set()
-        except Exception:
-            pass
-        self.top.focus_force()
-
-    def _on_press(self, event) -> None:
-        self._start = (event.x, event.y)
-        if self._rect_id is not None:
-            self._canvas.delete(self._rect_id)
-        self._rect_id = self._canvas.create_rectangle(
-            event.x, event.y, event.x, event.y, outline="#ff2222", width=3,
-        )
-
-    def _on_drag(self, event) -> None:
-        if self._start is None or self._rect_id is None:
-            return
-        x0, y0 = self._start
-        self._canvas.coords(self._rect_id, x0, y0, event.x, event.y)
-
-    def _on_release(self, event) -> None:
-        if self._start is None:
-            self._finish(None)
-            return
-        x0, y0 = self._start
-        left, right = sorted((x0, event.x))
-        top, bottom = sorted((y0, event.y))
-        if right - left < 12 or bottom - top < 12:
-            self._finish(None)  # too small: accidental click, cancel
-            return
-        ox = self._canvas.winfo_rootx()
-        oy = self._canvas.winfo_rooty()
-        self._finish((ox + left, oy + top, ox + right, oy + bottom))
-
-    def _finish(self, region) -> None:
-        self.result = region
-        try:
-            self.top.grab_release()
-        except Exception:
-            pass
-        self.top.destroy()
+def _version_is_newer(a: str, b: str) -> bool:
+    """Compare two 'x.y.z' version strings numerically."""
+    try:
+        return tuple(int(p) for p in a.split(".")) > tuple(int(p) for p in b.split("."))
+    except Exception:
+        return a > b
 
 
 class OverlayApp:
@@ -355,6 +296,18 @@ class OverlayApp:
         self._manual_source = None
         self._manual_calibrated = False
         self._meso_scan_ticks = 0
+        # Update-check state (see _check_for_updates): the latest release tag
+        # when a newer version is available, else None.
+        self._update_available: str | None = None
+        self._update_hint_label = None
+        # Startup screen size, for detecting resolution changes that would
+        # invalidate the manual region coordinates (see _check_screen_change).
+        self._screen_size: tuple[int, int] | None = self._query_screen_size()
+        self._screen_warned = False
+        # Timed status-pill override after a manual detection pass (see
+        # _run_manual_detection): the result text is shown until this timestamp.
+        self._detect_result_until = 0.0
+        self._detect_result_text = ""
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -365,7 +318,7 @@ class OverlayApp:
         ctk.set_window_scaling(self._settings.scale_pct / 100)
 
         self.root = ctk.CTk()
-        self.root.title("MapleStoryAnalyzer")
+        self.root.title("MsStatTractor")
         self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
         self.root.geometry("400x520+40+40")
@@ -415,6 +368,11 @@ class OverlayApp:
         # reported "按開始後一直顯示偵測中"). The first tick then runs the
         # one-shot manual detection inline (see _try_locate).
         self._rebuild_manual_source()
+        self._update_history_summary()
+
+        # Background GitHub update check -- non-blocking, shows a hint on the
+        # dashboard when a newer release exists.
+        self._check_for_updates()
 
         self._tick()
 
@@ -632,6 +590,14 @@ class OverlayApp:
         # Session.record_meso).
         add_kv_row(loss_card, 2, "mesostart", "kv_meso_start")
         add_kv_row(loss_card, 3, "mesocurrent", "kv_meso_current")
+        # Faint hint under the meso rows: the counter only exists while the
+        # inventory is open.
+        self._meso_hint_label = ctk.CTkLabel(
+            loss_card, text="", anchor="w", justify="left",
+            text_color=INK_FAINT, font=self._font(9, bold=False),
+        )
+        self._i18n(self._meso_hint_label, "meso_hint", size=9, bold=False)
+        self._meso_hint_label.grid(row=4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
         # Three buttons share one row: the left cycles Pause/Resume/Start
         # (see _on_pause_button_clicked), the middle is Stop -- only shown
@@ -667,7 +633,25 @@ class OverlayApp:
         self._i18n(self._restart_button, "restart_button", size=13, bold=True)
         self._restart_button.grid(row=0, column=2, sticky="ew", padx=(3, 0))
 
+        # Update-available hint (hidden until _check_for_updates finds a newer
+        # release) -- sits under the button row, out of the way.
+        self._update_hint_label = ctk.CTkLabel(
+            parent, text="", corner_radius=8, fg_color=SURFACE_2,
+            text_color=EXP_COLOR, font=self._font(10, bold=True),
+            anchor="w", justify="left", wraplength=320,
+        )
+        self._update_hint_label.grid(row=5, column=0, sticky="ew", padx=2, pady=(4, 2))
+        self._update_hint_label.grid_remove()
+
     def _build_history_tab(self, parent) -> None:
+        # Summary strip: total sessions / today's EXP / current-map avg rate
+        # (see _update_history_summary), plus a cleanup nudge when large.
+        self._history_summary_label = ctk.CTkLabel(
+            parent, text="", anchor="w", justify="left",
+            text_color=INK_DIM, font=self._font(10, bold=False),
+        )
+        self._history_summary_label.pack(fill="x", padx=12, pady=(4, 0))
+
         self._clear_history_button = ctk.CTkButton(
             parent, command=self._on_clear_history_clicked,
             fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=HP_COLOR,
@@ -794,7 +778,14 @@ class OverlayApp:
             card, variable=self._save_on_restart_var, text_color=INK,
             progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
             command=self._on_save_on_restart_changed,
-        ), "settings_save_on_restart", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 4))
+        ), "settings_save_on_restart", size=11, bold=False).pack(fill="x", padx=12, pady=0)
+
+        self._notify_on_stop_var = tk.BooleanVar(value=self._settings.notify_on_stop)
+        self._i18n(ctk.CTkSwitch(
+            card, variable=self._notify_on_stop_var, text_color=INK,
+            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
+            command=self._on_notify_on_stop_changed,
+        ), "settings_notify_on_stop", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 4))
 
         # MESO: found by the background locator's full-frame detection pass
         # (the same one that locates the stat panel), so it costs nothing
@@ -907,6 +898,10 @@ class OverlayApp:
 
     def _on_save_on_restart_changed(self) -> None:
         self._settings.save_on_restart = self._save_on_restart_var.get()
+        self._persist_settings()
+
+    def _on_notify_on_stop_changed(self) -> None:
+        self._settings.notify_on_stop = self._notify_on_stop_var.get()
         self._persist_settings()
 
     def _on_track_meso_changed(self) -> None:
@@ -1045,7 +1040,7 @@ class OverlayApp:
         when the user finishes (None if they cancel). Blocks on wait_window.
         Wrapped in _modal() so a session can't finalize mid-selection."""
         with self._modal():
-            selector = _RegionSelector(self.root, self._t(title_key), self._t("region_selector_hint"))
+            selector = RegionSelector(self.root, self._t(title_key), self._t("region_selector_hint"))
             self.root.wait_window(selector.top)
             if selector.result is not None:
                 callback(selector.result)
@@ -1066,6 +1061,10 @@ class OverlayApp:
         for key, (lbl, value) in self._kv_rows.items():
             for w in (lbl, value):
                 w.grid() if visible_kv[key] else w.grid_remove()
+
+        # The meso hint only makes sense when meso tracking is on.
+        if getattr(self, "_meso_hint_label", None) is not None:
+            self._meso_hint_label.grid() if s.track_meso else self._meso_hint_label.grid_remove()
 
     # ---- tick loop ---------------------------------------------------------
 
@@ -1111,6 +1110,8 @@ class OverlayApp:
         # correct under screen magnifiers (Megapipe) and a dragged
         # inventory window.
         self._try_locate()
+        # Warn once if the screen resolution changed (stale manual regions).
+        self._check_screen_change()
 
         try:
             if self._stat_boxes:
@@ -1301,7 +1302,13 @@ class OverlayApp:
         if not (s.use_manual and s.manual_stat_region is not None):
             return
         self._manual_calibrated = False
-        self._refresh_manual_status()  # surface "偵測中…" before the blocking pass
+        self._refresh_manual_status()  # surface "偵測中…" in the settings status
+        # Show "偵測中…" on the dashboard too, and force a repaint BEFORE the
+        # blocking pass so the user sees feedback instead of a frozen window.
+        self._status_pill.configure(
+            text=self._t("status_calibrating"), fg_color=SURFACE_2, text_color=EXP_COLOR,
+        )
+        self.root.update_idletasks()
         stat_frac, meso_frac, meso_value = {}, None, None
         try:
             from .capture import ManualScreenCapture
@@ -1326,6 +1333,14 @@ class OverlayApp:
         except Exception:
             stat_frac, meso_frac, meso_value = {}, None, None
         self._apply_locate(stat_frac, meso_frac, meso_value)
+        # Surface the result on the dashboard status pill for a few seconds
+        # (see _render's timed override) -- no need to dig into Settings.
+        if self._stat_boxes:
+            self._detect_result_text = self._t("detect_result_ok", n=len(self._stat_boxes))
+        else:
+            self._detect_result_text = self._t("detect_result_fail")
+        self._detect_result_until = time.time() + 3.0
+        self._render(self._last)
 
     def _on_detect_clicked(self) -> None:
         """Manual "辨識" button: force a fresh detection of the marked regions."""
@@ -1440,6 +1455,7 @@ class OverlayApp:
             self._log(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(summary, len(self._session_history))}")
             self._append_history_card(summary, len(self._session_history))
             self._save_history()
+            self._update_history_summary()
 
     def _finalize_and_maybe_stop(self) -> None:
         """The timer rolling over. Always commits to History first; then
@@ -1455,6 +1471,7 @@ class OverlayApp:
             self._session.pause()
             self._run_state = "stopped"
             self._apply_run_state()
+            self._notify_session_end()
         else:
             self._session.start()
 
@@ -1477,6 +1494,7 @@ class OverlayApp:
         self._run_state = "stopped"
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
+        self._notify_session_end()
 
     def _on_pause_button_clicked(self) -> None:
         """One button, three roles depending on _run_state -- see
@@ -1533,12 +1551,14 @@ class OverlayApp:
             # the first card added) -- nothing re-packs it once the list is
             # emptied again (e.g. via Clear History), so do it explicitly.
             self._history_empty_label.pack(pady=24)
+            self._update_history_summary()
             return
         # Cards are always inserted at the top (newest-first) -- rebuilding
         # oldest-first via _append_history_card reproduces the exact same
         # final order without needing separate "rebuild" layout logic.
         for index, summary in enumerate(self._session_history, start=1):
             self._append_history_card(summary, index)
+        self._update_history_summary()
 
     def _append_history_card(self, summary: SessionSummary, index: int) -> None:
         self._history_empty_label.pack_forget()
@@ -1761,6 +1781,122 @@ class OverlayApp:
     def _set_status_error(self, text: str) -> None:
         self._status_pill.configure(text=text, fg_color=SURFACE_2, text_color=HP_COLOR)
 
+    # ---- utility / background checks ------------------------------------
+
+    @staticmethod
+    def _query_screen_size() -> tuple[int, int] | None:
+        """Current primary-screen size in pixels, or None when unavailable."""
+        try:
+            if sys.platform == "win32":
+                import ctypes
+
+                return (
+                    int(ctypes.windll.user32.GetSystemMetrics(0)),
+                    int(ctypes.windll.user32.GetSystemMetrics(1)),
+                )
+            import mss
+
+            mon = mss.mss().monitors[0]
+            return (int(mon["width"]), int(mon["height"]))
+        except Exception:
+            return None
+
+    def _check_screen_change(self) -> None:
+        """Warn once when the screen resolution changes -- manual regions are
+        stored as absolute screen pixels, so a resolution/monitor change makes
+        them stale without any other signal."""
+        if self._screen_warned or not self._settings.use_manual:
+            return
+        current = self._query_screen_size()
+        if current is None or self._screen_size is None or current == self._screen_size:
+            return
+        self._screen_size = current
+        self._screen_warned = True
+        with self._modal():
+            messagebox.showwarning(
+                self._t("settings_manual"),
+                self._t("screen_changed_prompt"),
+                parent=self.root,
+            )
+
+    def _check_for_updates(self) -> None:
+        """Query the GitHub API on a background thread for the latest release;
+        show a hint in the dashboard when a newer version exists."""
+        def _worker() -> None:
+            try:
+                import urllib.request
+
+                with urllib.request.urlopen(
+                    "https://api.github.com/repos/aaaagent0614-art/MSLevelingTool/releases/latest",
+                    timeout=6,
+                ) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                latest = str(data.get("tag_name", "")).lstrip("v")
+                if latest and _version_is_newer(latest, __version__):
+                    self._update_available = latest
+                    self.root.after(0, self._show_update_hint)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_update_hint(self) -> None:
+        if self._update_hint_label is None or self._update_available is None:
+            return
+        self._update_hint_label.configure(
+            text=self._t("update_available", ver=self._update_available)
+        )
+        self._update_hint_label.grid()
+
+    def _notify_session_end(self) -> None:
+        """Optional alert when a session ends (sound + brief topmost flash)."""
+        if not self._settings.notify_on_stop:
+            return
+        try:
+            if sys.platform == "win32":
+                import winsound
+
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            else:
+                self.root.bell()
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.root.bell()
+
+    def _update_history_summary(self) -> None:
+        """Refresh the History tab's summary strip: total sessions, today's EXP,
+        and the current map's average EXP/min -- plus a cleanup hint once the
+        history grows large."""
+        if getattr(self, "_history_summary_label", None) is None:
+            return
+        sessions = self._session_history
+        if not sessions:
+            self._history_summary_label.configure(text="")
+            return
+        today = time.strftime("%Y-%m-%d")
+        today_exp = 0
+        rates: list[float] = []
+        cur_map = self._settings.map_name
+        for s in sessions:
+            if time.strftime("%Y-%m-%d", time.localtime(s.start_time)) == today:
+                d = s.exp_diff
+                if d:
+                    today_exp += d
+            if cur_map and s.map_name == cur_map:
+                r = s.exp_per_min
+                if r is not None:
+                    rates.append(r)
+        parts = [self._t("history_summary_count", n=len(sessions))]
+        if today_exp:
+            parts.append(self._t("history_summary_today", exp=f"{today_exp:,}"))
+        if rates:
+            avg = sum(rates) / len(rates)
+            parts.append(self._t("history_summary_avg", rate=f"{avg:,.0f}"))
+        text = "   ·   ".join(parts)
+        if len(sessions) >= _HISTORY_CLEANUP_THRESHOLD:
+            text += "\n" + self._t("history_cleanup_hint", n=len(sessions))
+        self._history_summary_label.configure(text=text)
+
     # ---- render --------------------------------------------------------
 
     def _render(self, snap: StatSnapshot) -> None:
@@ -1871,8 +2007,14 @@ class OverlayApp:
         # Pause/stop/calibration are user- or engine-driven states that take
         # priority over the activity-based idle/tracking read below -- e.g. a
         # paused session with real HP/MP/EXP movement in its history isn't
-        # "Idle", it's "Paused".
-        if self._run_state == "paused":
+        # "Idle", it's "Paused". A timed manual-detection result (see
+        # _run_manual_detection) overrides all of these for a few seconds.
+        if time.time() < getattr(self, "_detect_result_until", 0.0):
+            self._status_pill.configure(
+                text=self._detect_result_text, fg_color=SURFACE_2,
+                text_color=OK_COLOR if self._stat_boxes else HP_COLOR,
+            )
+        elif self._run_state == "paused":
             self._status_pill.configure(text=self._t("status_paused"), fg_color=SURFACE_2, text_color=EXP_COLOR)
         elif self._run_state == "stopped":
             self._status_pill.configure(text=self._t("status_stopped"), fg_color=SURFACE_2, text_color=INK_DIM)

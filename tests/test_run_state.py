@@ -136,6 +136,15 @@ class _StubApp:
     def _persist_settings(self):
         pass  # no disk I/O in run-state tests
 
+    def _update_history_summary(self):
+        pass  # UI summary strip -- out of scope for run-state tests
+
+    def _notify_session_end(self):
+        pass  # sound/flash -- out of scope for run-state tests
+
+    def _check_screen_change(self):
+        pass  # screen-size warning -- out of scope for run-state tests
+
     # Bound to the real implementations -- these are the actual behaviour
     # under test, not stand-ins.
     _t = OverlayApp._t
