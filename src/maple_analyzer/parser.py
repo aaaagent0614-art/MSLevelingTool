@@ -43,6 +43,16 @@ _EXP_CUR_RE = re.compile(r"EXP\D{0,3}(\d+)\s*[\[({]", re.IGNORECASE)
 _EXP_PCT_RE = re.compile(r"(\d{1,2}[.\s:]\d{1,2}|\d{3,4})\s*%")
 _LV_RE = re.compile(r"LV\.?\D{0,3}(\d+)", re.IGNORECASE)
 
+# Detection-text patterns for locating the stat panel fields in a full-frame
+# detection pass (see find_stat_fields) -- the same regexes the per-field
+# recognition path uses, applied to the boxes detection finds.
+_STAT_FIELD_PATTERNS: dict[str, re.Pattern] = {
+    "LV": _LV_RE,
+    "HP": _PAIR_RE["HP"],
+    "MP": _PAIR_RE["MP"],
+    "EXP": _EXP_CUR_RE,
+}
+
 # Meso counter (inventory open) renders as digits with comma separators,
 # e.g. "1,234,567". OCR drops or mangles commas regularly, so accept any
 # digit/comma run and strip the commas -- the digits alone are the value.
@@ -187,3 +197,52 @@ def find_meso_from_boxes(
     """Value-only convenience over find_meso_candidate (see its docstring)."""
     found = find_meso_candidate(boxes, frame_size)
     return found[4] if found is not None else None
+
+
+def find_stat_fields(
+    boxes: list[tuple[int, int, int, int, str]],
+) -> dict[str, tuple[int, int, int, int]]:
+    """Locate the stat panel fields in a full-frame detection pass.
+
+    Matches each detection box's text against the known panel patterns
+    ('LV. 32', 'HP[602/602]', 'MP[...]', 'EXP...[%]') and returns the box
+    (x, y, w, h) per field found. Works on magnified frames too -- the text
+    is bigger but the patterns are unchanged, which is what makes the HUD
+    survive screen magnifiers (Megapipe). Empty dict when the panel is not
+    visible (covered / not rendered / OCR failed)."""
+    found: dict[str, tuple[int, int, int, int]] = {}
+    digit_boxes: list[tuple[int, int, int, int, str]] = []
+    for x, y, w, h, text in boxes:
+        stripped = text.strip()
+        matched = False
+        for name, pat in _STAT_FIELD_PATTERNS.items():
+            if name in found:
+                continue
+            if pat.search(stripped):
+                found[name] = (int(x), int(y), int(w), int(h))
+                matched = True
+                break
+        if not matched and re.fullmatch(r"[\d,]+", stripped):
+            digit_boxes.append((int(x), int(y), int(w), int(h), stripped))
+
+    # LV split fallback: detection often splits 'LV. 32' into an 'LV.' box
+    # and a separate '32' box (seen on the 1280x868 client frame). Neither
+    # matches _LV_RE alone; merge the 'LV.' label with the digit box
+    # immediately to its right (vertically overlapping) into one box.
+    if "LV" not in found:
+        for x, y, w, h, text in boxes:
+            stripped = text.strip()
+            if not re.match(r"^LV\.?$", stripped, re.IGNORECASE):
+                continue
+            for dx, dy, dw, dh, _dtext in digit_boxes:
+                if dx < x + w - 4 or dx > x + w + 80:
+                    continue
+                if dy >= y + h or dy + dh <= y:
+                    continue
+                x0, y0 = min(x, dx), min(y, dy)
+                x1, y1 = max(x + w, dx + dw), max(y + h, dy + dh)
+                found["LV"] = (x0, y0, x1 - x0, y1 - y0)
+                break
+            if "LV" in found:
+                break
+    return found

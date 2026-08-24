@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from maple_analyzer.parser import find_meso_candidate, find_meso_from_boxes
+from maple_analyzer.parser import find_meso_candidate, find_meso_from_boxes, find_stat_fields
 
 _DEJAVU = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 _BG = (10, 12, 18)
@@ -93,6 +93,55 @@ def test_candidate_returns_box_and_value():
 def test_absurd_digit_blob_rejected():
     boxes = [(100, 100, 200, 21, "99999999999999999999")]
     assert find_meso_from_boxes(boxes, (1351, 800)) is None
+
+
+# ---- stat panel location (find_stat_fields) ------------------------------
+
+def test_find_stat_fields_matches_panel_text():
+    """Detection boxes from a real-style frame: the four panel fields plus
+    the meso counter. Only the panel fields must be located."""
+    boxes = [
+        (436, 1115, 89, 24, "LV. 32"),
+        (750, 1101, 108, 24, "HP[602/602]"),
+        (913, 1101, 129, 24, "MP[2100/2100]"),
+        (1083, 1103, 148, 21, "EXP38829[3183%]"),
+        (1615, 596, 75, 21, "154,821"),
+    ]
+    found = find_stat_fields(boxes)
+    assert set(found) == {"LV", "HP", "MP", "EXP"}
+    assert found["LV"] == (436, 1115, 89, 24)
+    assert found["EXP"] == (1083, 1103, 148, 21)
+
+
+def test_find_stat_fields_ignores_unrelated_text():
+    boxes = [
+        (1509, 144, 122, 18, "ITEMINVENTORY"),
+        (1694, 626, 71, 22, "楓幣點數"),
+        (1200, 262, 131, 27, "MapleStory"),
+    ]
+    assert find_stat_fields(boxes) == {}
+
+
+def test_find_stat_fields_partial_panel():
+    """If some fields are obscured, the visible ones are still located."""
+    boxes = [(750, 1101, 108, 24, "HP[602/602]")]
+    assert find_stat_fields(boxes) == {"HP": (750, 1101, 108, 24)}
+
+
+def test_find_stat_fields_merges_split_lv():
+    """Detection splits 'LV. 32' into 'LV.' + '32' boxes on some frames --
+    the label must be merged with the digit box to its right."""
+    boxes = [
+        (79, 831, 41, 27, "LV."),
+        (131, 833, 39, 23, "32"),
+        (394, 821, 104, 20, "HP[602/602]"),
+    ]
+    found = find_stat_fields(boxes)
+    assert "LV" in found
+    x, y, w, h = found["LV"]
+    # Merged box spans both the label and the digits.
+    assert x <= 79 and x + w >= 170
+    assert y <= 831 and y + h >= 858
 
 
 # ---- end-to-end through the real OCR engine ------------------------------

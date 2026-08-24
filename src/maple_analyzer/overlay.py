@@ -52,7 +52,7 @@ from PIL import Image
 from .capture import PANEL_OBSCURED
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
-from .parser import StatSnapshot, find_meso_candidate, parse_fields, parse_meso
+from .parser import StatSnapshot, find_meso_candidate, find_stat_fields, parse_fields
 from .rate import Session, SessionSummary
 from .settings import Settings
 
@@ -103,16 +103,17 @@ TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
 SCALE_STEP_PCT = 10
 SCALE_MIN_PCT = 50
 SCALE_MAX_PCT = 150
-# Meso scans use full-frame *detection* OCR (~600ms+). Originally run on the
-# tick thread this blocked the whole HUD for that long every scan (user
-# reported the UI feeling laggy when track_meso is on) -- it now runs on a
-# background thread (see _try_read_meso), so the interval only sets how
-# often we LOOK, not how long the UI freezes. Every 5 ticks = ~2.5s.
-MESO_SCAN_INTERVAL_TICKS = 5
-# Consecutive empty reads from the cached meso box before dropping the
-# cache and re-running full-frame detection to relocate the counter
-# (it moves if the inventory window is dragged).
-MESO_BOX_MISS_LIMIT = 3
+# Background locator cadence. Each pass runs full-frame *detection* OCR
+# (~600ms+) in a daemon thread to re-find the stat panel fields and the
+# meso counter, so the tick thread only ever does cheap recognition reads
+# on cached boxes. Every 10 ticks = ~5s. Also what makes the HUD survive
+# screen magnifiers (Megapipe): the detected positions track the rescaled
+# layout every pass.
+LOCATE_INTERVAL_TICKS = 10
+# Consecutive locator passes that fail to find the stat panel before
+# falling back to the fixed regions.FIELD_BOXES (transient OCR misses
+# shouldn't flap the tick between detected and fixed boxes).
+LOCATE_EMPTY_LIMIT = 3
 
 # Live tab's Pause/Resume/Start + Restart button row -- see _apply_run_state.
 BUTTON_HEIGHT = 28
@@ -235,16 +236,23 @@ class OverlayApp:
         # instead of repeating the same line every 2s retry.
         self._last_capture_error: str | None = None
         self._last_client_size: tuple[int, int] | None = None
-        # Async meso scan state (see _try_read_meso / _apply_meso_result).
-        # The OCR engine is lazily created inside the worker thread so its
-        # model load (seconds) never blocks the UI thread.
-        self._meso_scan_ticks = 0
-        self._meso_scan_thread: threading.Thread | None = None
-        self._meso_ocr: StatPanelOcr | None = None
-        # Cached meso counter position (fractions of the client frame) +
-        # consecutive-miss counter -- see _try_read_meso's fast path.
+        # Background locator state (see _try_locate / _apply_locate). A
+        # daemon thread periodically runs full-frame detection to find the
+        # stat panel fields AND the meso counter, caching their positions
+        # so the tick thread only does cheap recognition reads. This is what
+        # keeps the HUD correct under screen magnifiers (Megapipe): the
+        # detected positions track the magnified layout every pass.
+        self._locate_ticks = 0
+        self._locate_thread: threading.Thread | None = None
+        self._locate_ocr: StatPanelOcr | None = None
+        # Detected stat-field boxes as fractions of the client frame:
+        # {'LV': (fx, fy, fw, fh), ...}. None until the locator has found
+        # the panel (tick falls back to regions.FIELD_BOXES meanwhile).
+        self._stat_boxes: dict[str, tuple[float, float, float, float]] | None = None
+        self._locate_empty_count = 0
+        # Detected meso counter box (fractions), refreshed every locate pass
+        # so a dragged inventory window or a zoom change self-corrects.
         self._meso_box: tuple[float, float, float, float] | None = None
-        self._meso_box_misses = 0
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -378,6 +386,14 @@ class OverlayApp:
     # ---- tab construction ------------------------------------------------
 
     def _build_live_tab(self, parent) -> None:
+        # Scrollable so the window can stay compact at any scale while every
+        # block stays reachable -- a scrollbar appears on the right when the
+        # content is taller than the tab (per user request 2026-08-24: at
+        # 120% scale the Start button used to sit below the fold with no
+        # way to reach it).
+        scroll = ctk.CTkScrollableFrame(parent, fg_color=BG, label_text="")
+        scroll.pack(fill="both", expand=True)
+        parent = scroll
         parent.grid_columnconfigure(0, weight=1)
 
         # Status + session timer share one row, both shrunk down (smaller
@@ -772,17 +788,29 @@ class OverlayApp:
     def _do_tick(self) -> int:
         t0 = time.perf_counter()
 
-        # Meso first, and independent of the stat-panel path: opening the
-        # inventory (the only time meso is readable) obscures the stat
-        # panel, so gating meso on a successful panel grab would make it
-        # permanently unreadable. Its own failures are silent -- no gold
-        # text on screen is the normal "inventory closed" state, not an
-        # error worth surfacing.
-        if self._settings.track_meso:
-            self._try_read_meso()
+        # Kick the background locator (throttled inside). It re-finds the
+        # stat panel fields + meso counter on the full frame so reads stay
+        # correct under screen magnifiers (Megapipe) and a dragged
+        # inventory window.
+        self._try_locate()
 
         try:
-            field_images = self._source.grab_fields()
+            if self._stat_boxes:
+                # Located path (Megapipe-safe): crop each detected field box
+                # out of a single full-frame grab and OCR them recognition-
+                # only, exactly like grab_fields does for the fixed boxes.
+                # Detection boxes are tight, so pad each crop slightly.
+                frame = self._source.grab_full()
+                fw, fh = frame.size
+                field_images = {}
+                for name, (fx, fy, fw2, fh2) in self._stat_boxes.items():
+                    x = max(0, int(fx * fw) - 2)
+                    y = max(0, int(fy * fh) - 2)
+                    w = max(1, int(fw2 * fw) + 4)
+                    h = max(1, int(fh2 * fh) + 4)
+                    field_images[name] = frame.crop((x, y, min(fw, x + w), min(fh, y + h)))
+            else:
+                field_images = self._source.grab_fields()
         except RuntimeError as e:
             # Game window gone (closed/crashed), minimized, or the stat panel
             # is covered by another window -- don't crash the HUD, show it
@@ -865,34 +893,27 @@ class OverlayApp:
         elapsed_ms = (time.perf_counter() - t0) * 1000
         return max(0, int(TARGET_MS - elapsed_ms))
 
-    def _try_read_meso(self) -> None:
-        """One meso counter read attempt (called from _do_tick when
-        track_meso is on).
+    def _try_locate(self) -> None:
+        """Kick off a background locator pass (throttled to
+        LOCATE_INTERVAL_TICKS).
 
-        The counter lives in the draggable inventory window, so its position
-        is unknown a priori -- full-frame *detection* OCR finds it (see
-        parser.find_meso_from_boxes). Detection is expensive, so this is
-        throttled to MESO_SCAN_INTERVAL_TICKS; the extra 5s latency is
-        invisible because the user opens the inventory deliberately at each
-        session end.
-
-        Silent on every failure mode -- no digit blob on screen (inventory
-        closed) is the normal state, and a capture/OCR hiccup here shouldn't
-        take down the tick or spam the log the way stat-panel errors do.
-
-        Runs the actual scan on a daemon thread so the tick thread never
-        blocks on full-frame detection OCR (that was the HUD feeling frozen
-        every scan). Tk is only ever touched via root.after from the worker,
-        which marshals back to the main thread."""
-        self._meso_scan_ticks = getattr(self, "_meso_scan_ticks", 0) + 1
-        if self._meso_scan_ticks < MESO_SCAN_INTERVAL_TICKS:
+        Full-frame *detection* OCR (~600ms) finds BOTH the stat panel
+        fields (LV/HP/MP/EXP by their text patterns) and the meso counter,
+        then caches their positions as frame fractions. The tick thread
+        only ever does cheap recognition reads on those cached boxes, so
+        the HUD stays correct even when a screen magnifier (Megapipe)
+        rescales the layout -- the detected positions track the magnified
+        frame every pass. Runs on a daemon thread so the UI never blocks;
+        Tk is only touched via root.after."""
+        self._locate_ticks = getattr(self, "_locate_ticks", 0) + 1
+        if self._locate_ticks < LOCATE_INTERVAL_TICKS:
             return
-        self._meso_scan_ticks = 0
-        _scan_thread = getattr(self, "_meso_scan_thread", None)
-        if _scan_thread is not None and _scan_thread.is_alive():
-            return  # previous scan still running -- skip this round
+        self._locate_ticks = 0
+        _thread = getattr(self, "_locate_thread", None)
+        if _thread is not None and _thread.is_alive():
+            return  # previous pass still running -- skip this round
 
-        def _scan() -> None:
+        def _locate() -> None:
             try:
                 # Fresh capture on THIS thread: the shared mss/win32 handles
                 # live on the tick thread, and re-entering them from a second
@@ -907,60 +928,59 @@ class OverlayApp:
                     frame = self._source.grab_full()
                 # Own OCR engine: the main instance is used by the tick
                 # thread concurrently, and RapidOCR is not documented
-                # thread-safe. Lazy-init here so the first scan's model
+                # thread-safe. Lazy-init here so the first pass's model
                 # load (seconds) happens off the UI thread too.
-                meso_ocr = getattr(self, "_meso_ocr", None)
-                if meso_ocr is None:
-                    meso_ocr = StatPanelOcr()
-                    self._meso_ocr = meso_ocr
-
-                # Fast path: the counter's position was found before (it
-                # only moves if the inventory window is dragged). A cached
-                # box reads with recognition-only OCR (~15ms) instead of a
-                # full-frame detection scan (~600ms). After a few misses the
-                # cache is dropped and we relocate with detection.
-                box = getattr(self, "_meso_box", None)  # fractions of frame
-                if box is not None:
-                    fw, fh = frame.size
-                    x = int(box[0] * fw)
-                    y = int(box[1] * fh)
-                    w = max(1, int(box[2] * fw))
-                    h = max(1, int(box[3] * fh))
-                    try:
-                        meso = parse_meso(meso_ocr.read_field(frame.crop((x, y, x + w, y + h))))
-                    except Exception:
-                        meso = None
-                    if meso is not None:
-                        self._meso_box_misses = 0
-                    else:
-                        self._meso_box_misses = getattr(self, "_meso_box_misses", 0) + 1
-                        if self._meso_box_misses >= MESO_BOX_MISS_LIMIT:
-                            self._meso_box = None  # relocate on next round
-                        self.root.after(0, lambda: self._apply_meso_result(None))
-                        return
-                else:
-                    found = find_meso_candidate(meso_ocr.detect_text(frame), frame.size)
-                    if found is None:
-                        self.root.after(0, lambda: self._apply_meso_result(None))
-                        return
-                    x, y, w, h, meso = found
-                    fw, fh = frame.size
-                    self._meso_box = (x / fw, y / fh, w / fw, h / fh)
-                    self._meso_box_misses = 0
+                locate_ocr = getattr(self, "_locate_ocr", None)
+                if locate_ocr is None:
+                    locate_ocr = StatPanelOcr()
+                    self._locate_ocr = locate_ocr
+                boxes = locate_ocr.detect_text(frame)
+                stat = find_stat_fields(boxes)
+                meso_found = find_meso_candidate(boxes, frame.size)
+                fw, fh = frame.size
+                stat_frac = {
+                    name: (x / fw, y / fh, w / fw, h / fh)
+                    for name, (x, y, w, h) in stat.items()
+                }
+                meso_frac = None
+                meso_value = None
+                if meso_found is not None:
+                    x, y, w, h, meso_value = meso_found
+                    meso_frac = (x / fw, y / fh, w / fw, h / fh)
             except Exception:
-                meso = None
-            self.root.after(0, lambda m=meso: self._apply_meso_result(m))
+                stat_frac, meso_frac, meso_value = {}, None, None
+            self.root.after(
+                0,
+                lambda s=stat_frac, m=meso_frac, v=meso_value: self._apply_locate(s, m, v),
+            )
 
-        self._meso_scan_thread = threading.Thread(target=_scan, daemon=True)
-        self._meso_scan_thread.start()
+        self._locate_thread = threading.Thread(target=_locate, daemon=True)
+        self._locate_thread.start()
 
-    def _apply_meso_result(self, meso: int | None) -> None:
-        """Main-thread half of the async meso scan (see _try_read_meso)."""
-        if meso is None:
-            return
-        if self._run_state == "running":
-            self._session.record_meso(meso)
-            self._render(self._last)  # show the updated meso row promptly
+    def _apply_locate(
+        self,
+        stat_frac: dict[str, tuple[float, float, float, float]],
+        meso_frac: tuple[float, float, float, float] | None,
+        meso_value: int | None,
+    ) -> None:
+        """Main-thread half of the locator pass (see _try_locate)."""
+        if stat_frac:
+            self._stat_boxes = stat_frac
+            self._locate_empty_count = 0
+        else:
+            # Panel not found this pass (covered / not rendered). Keep the
+            # last known boxes for a few passes -- transient OCR misses
+            # shouldn't flap the tick between detected and fixed boxes --
+            # then fall back to regions.FIELD_BOXES until the panel returns.
+            self._locate_empty_count = getattr(self, "_locate_empty_count", 0) + 1
+            if self._locate_empty_count >= LOCATE_EMPTY_LIMIT:
+                self._stat_boxes = None
+
+        if meso_frac is not None:
+            self._meso_box = meso_frac
+            if self._run_state == "running" and meso_value is not None:
+                self._session.record_meso(meso_value)
+                self._render(self._last)  # show the updated meso rows promptly
 
     def _update_timer_label(self) -> None:
         """Split out of _render so the capture-error path in _do_tick can

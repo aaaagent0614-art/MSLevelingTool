@@ -104,6 +104,10 @@ class _StubApp:
         self._last_capture_error: str | None = None
         self._last_client_size = None
         self.root = _StubRoot()
+        # Locator state: run-state tests don't exercise the background
+        # locator thread; _do_tick reads _stat_boxes and calls _try_locate.
+        self._stat_boxes = None
+        self._meso_box = None
 
         self._status_pill = _StubWidget()
         self._timer_label = _StubWidget()
@@ -119,6 +123,9 @@ class _StubApp:
 
     def _rebuild_history_cards(self):
         self.rebuild_calls += 1
+
+    def _try_locate(self):
+        pass  # background locator thread is out of scope for run-state tests
 
     # Bound to the real implementations -- these are the actual behaviour
     # under test, not stand-ins.
