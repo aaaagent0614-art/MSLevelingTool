@@ -58,6 +58,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "history_hp_loss": {"en": "HP LOSS", "zh": "HP 損失"},
     "history_mp_loss": {"en": "MP LOSS", "zh": "MP 損失"},
     "history_meso": {"en": "MESO", "zh": "楓幣"},
+    "history_exp": {"en": "EXP", "zh": "經驗值"},
     "history_exp_per_min": {"en": "EXP/MIN", "zh": "經驗/分"},
     "history_restarted_early": {"en": "restarted early", "zh": "提前重啟"},
     "history_clear_button": {"en": "Clear History", "zh": "清除紀錄"},

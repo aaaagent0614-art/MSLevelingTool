@@ -1475,11 +1475,14 @@ class OverlayApp:
 
         mini = ctk.CTkFrame(card, fg_color="transparent")
         mini.pack(fill="x", padx=12, pady=(0, 10))
-        mini.grid_columnconfigure((0, 1, 2), weight=1, uniform="mini")
+        mini.grid_columnconfigure((0, 1), weight=1, uniform="mini")
 
-        def mini_stat(col: int, label: str, value: str, color: str) -> None:
+        def mini_stat(row: int, col: int, label: str, value: str, color: str) -> None:
             box = ctk.CTkFrame(mini, fg_color=SURFACE_2, corner_radius=7)
-            box.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 4, 0))
+            box.grid(
+                row=row, column=col, sticky="ew",
+                padx=(0 if col == 0 else 4, 0), pady=(0 if row == 0 else 4, 0),
+            )
             ctk.CTkLabel(box, text=label, font=self._font(9, bold=True), text_color=INK_FAINT, anchor="w").pack(
                 fill="x", padx=8, pady=(6, 0)
             )
@@ -1487,13 +1490,22 @@ class OverlayApp:
                 fill="x", padx=8, pady=(0, 6)
             )
 
-        mini_stat(0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
-        mini_stat(1, self._t("history_mp_loss"), _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
+        # 2x2 grid (per user request 2026-08-24): EXP top-left, meso top-right,
+        # HP loss bottom-left, MP loss bottom-right.
+        exp_s, exp_c = "--", INK_FAINT
+        if summary.exp_diff is not None:
+            exp_s = f"{summary.exp_diff:+,}"
+            exp_c = EXP_COLOR if summary.exp_diff >= 0 else HP_COLOR
+        mini_stat(0, 0, self._t("history_exp"), exp_s, exp_c)
+
         meso_s, meso_c = "--", INK_FAINT
         if summary.meso_gained is not None:
             meso_s = f"{summary.meso_gained:+,}"
             meso_c = EXP_COLOR if summary.meso_gained >= 0 else HP_COLOR
-        mini_stat(2, self._t("history_meso"), meso_s, meso_c)
+        mini_stat(0, 1, self._t("history_meso"), meso_s, meso_c)
+
+        mini_stat(1, 0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
+        mini_stat(1, 1, self._t("history_mp_loss"), _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
 
     @contextlib.contextmanager
     def _modal(self):
