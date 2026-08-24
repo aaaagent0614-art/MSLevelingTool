@@ -47,6 +47,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "kv_meso_start": {"en": "Start meso", "zh": "起始楓幣"},
     "kv_meso_current": {"en": "Current meso", "zh": "當前楓幣"},
     "kv_map": {"en": "Map", "zh": "地圖"},
+    "kv_map_placeholder": {"en": "+ Click to enter map", "zh": "＋ 點擊輸入地圖"},
 
     "restart_button": {"en": "Restart Session", "zh": "重新開始"},
     "pause_button": {"en": "Pause", "zh": "暫停"},

@@ -63,6 +63,10 @@ class SessionSummary:
     # User-assigned label, e.g. "grinding spot A". None until renamed via the
     # History tab -- UI-layer concern only, the engine never sets this.
     name: str | None = None
+    # Map the session was recorded on (typed by hand or auto-OCR'd from the
+    # map banner). UI-layer concern, set by overlay from Settings.map_name at
+    # finalize time -- the engine never reads the game's map itself.
+    map_name: str | None = None
 
     @property
     def exp_diff(self) -> int | None:

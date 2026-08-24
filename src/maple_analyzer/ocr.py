@@ -31,6 +31,29 @@ class StatPanelOcr:
             return ""
         return result[0][0]
 
+    def read_map_name(self, image: Image.Image) -> str:
+        """OCR for the map-name banner.
+
+        Map names are Traditional Chinese (e.g. '螞蟻洞 I'), which PP-OCR's
+        Simplified-Chinese-oriented recognition dictionary reads imperfectly --
+        no preprocessing fixes that (upscaling is a no-op because recognition
+        normalises to a fixed height; grayscale measurably worsens it, dropping
+        '蟻' entirely). Detection + a left-to-right join is the best available:
+        it isolates the name from a wider banner crop (channel/level text around
+        it) and keeps a split name ('螞蟻洞' + 'I') together. Imperfect reads are
+        still expected on traditional glyphs; the map field is user-editable and
+        the manual correction is what sticks (see overlay._detect_map_name_once).
+        """
+        result, _elapse = self._engine(np.array(image), use_det=True, use_cls=False)
+        if not result:
+            return ""
+        items: list[tuple[int, str]] = []
+        for box, text, _score in result:
+            xs = [p[0] for p in box]
+            items.append((min(xs), text))
+        items.sort()
+        return "".join(t for _, t in items).strip()
+
     def detect_text(self, image: Image.Image) -> list[tuple[int, int, int, int, str]]:
         """Full detection over an arbitrary frame: returns (x, y, w, h, text)
         tuples in image-pixel coordinates.

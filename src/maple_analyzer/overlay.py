@@ -368,7 +368,12 @@ class OverlayApp:
         self.root.title("MapleStoryAnalyzer")
         self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
-        self.root.geometry("340x460+40+40")
+        self.root.geometry("400x520+40+40")
+        # Minimum size so a quick drag of the resize handle can't collapse the
+        # window below what the History cards need -- the reported "快速拉動"
+        # breakage was the wide EXP-range row squeezing into a one-char-wide
+        # column when the window got too narrow (see _append_history_card).
+        self.root.minsize(340, 420)
 
         # segmented_button_font is deliberately set to the same chrome font
         # as the rest of the UI: without it, CTkTabview falls back to
@@ -400,6 +405,16 @@ class OverlayApp:
         self._tabview.set(self._tab_names["live"])  # CTkTabview defaults to the last-added tab otherwise
         self._apply_visibility()
         self._apply_run_state()
+
+        # Rebuild the manual-region capture source from the persisted settings.
+        # Without this, a relaunch with use_manual + a marked region saved
+        # starts with _manual_source=None, so _active_source() falls back to the
+        # auto GameWindowCapture -- which can't read the game under a screen
+        # magnifier, leaving the session stuck "calibrating" forever (the
+        # reported "按開始後一直顯示偵測中"). _rebuild_manual_source also primes
+        # _locate_ticks so the one-shot manual detection runs on the very first
+        # tick instead of waiting the normal 10-tick locate interval.
+        self._rebuild_manual_source()
 
         self._tick()
 
@@ -1386,15 +1401,27 @@ class OverlayApp:
 
     def _detect_map_name_once(self) -> None:
         """One-shot map-name OCR at session start (map_auto only). The map does
-        not change mid-session, so there's no need to keep re-reading it."""
+        not change mid-session, so there's no need to keep re-reading it.
+
+        Only auto-fills an EMPTY map field: OCR is imperfect on Traditional
+        Chinese (see ocr.read_map_name), and overwriting a manually-corrected
+        name with the same bad read every session was the reported pain point.
+        Once a name is set (by hand or a good OCR) it sticks until the user
+        clears it in the field, which re-arms auto-fill for the next session.
+        """
         s = self._settings
         if not (s.map_auto and s.map_region is not None):
             return
+        if s.map_name:
+            return  # already set -- don't clobber a manual correction with bad OCR
         try:
             from .capture import grab_region
 
             img = grab_region(s.map_region)
-            text = (self._ocr.read_field(img) or "").strip()
+            # Dedicated map-OCR path: upscales the small banner text before
+            # recognition (see ocr.read_map_name), which is what fixes the
+            # '螞蟻洞 I' -> '冏国' class of misreads.
+            text = (self._ocr.read_map_name(img) or "").strip()
             if text and text != s.map_name:
                 s.map_name = text
                 self._persist_settings()
@@ -1448,6 +1475,10 @@ class OverlayApp:
         # but meaningless 0-duration, 0-diff entry).
         if self._session.start_exp is not None and self._session.elapsed() >= 1.0:
             summary = self._session.finalize(self._settings.window_min)
+            # Stamp the session's map (typed or auto-OCR'd) onto the record so
+            # History cards can show it -- the engine (rate.py) doesn't know
+            # about maps, this is purely a UI-layer enrichment at commit time.
+            summary = dataclasses.replace(summary, map_name=self._settings.map_name or None)
             self._session_history.append(summary)
             self._log(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(summary, len(self._session_history))}")
             self._append_history_card(summary, len(self._session_history))
@@ -1577,6 +1608,15 @@ class OverlayApp:
         title_label.pack(side="left")
         title_label.bind("<Button-1>", lambda _e, i=index, lbl=title_label: self._on_rename_clicked(i, lbl))
 
+        # Map badge (requested 2026-08-24): the session's map as a small accent
+        # pill next to the title, so a History card is self-describing about
+        # *where* it was recorded. Omitted when the map was never set.
+        if summary.map_name:
+            ctk.CTkLabel(
+                head, text=summary.map_name, font=self._font(10, bold=True),
+                text_color=ACCENT, fg_color=SURFACE_2, corner_radius=6, padx=6, pady=1,
+            ).pack(side="left", padx=(8, 0))
+
         # Packed before dur_text below so it lands rightmost -- pack(side="right")
         # stacks from the outer edge inward in packing order, so whichever
         # side="right" widget is packed first ends up furthest right.
@@ -1620,20 +1660,33 @@ class OverlayApp:
         diff = summary.exp_diff
         diff_s = f"+{diff:,}" if diff is not None else "?"
         pct_diff = summary.exp_pct_diff
-        ctk.CTkLabel(rng, text=start_s, font=_FONT_MONO, text_color=INK).pack(side="left")
-        ctk.CTkLabel(rng, text=" → ", font=_FONT_MONO, text_color=INK_FAINT).pack(side="left")
-        ctk.CTkLabel(rng, text=end_s, font=_FONT_MONO, text_color=INK).pack(side="left")
-        ctk.CTkLabel(rng, text=f"  {diff_s}", font=_FONT_MONO, text_color=EXP_COLOR).pack(side="left")
+        # Two rows instead of one long left-packed run: the old single line
+        # (start → end +diff (+pct%) epm/min, six labels side by side) overflows
+        # a narrow window and Tk squeezes it into a one-char-wide vertical
+        # column -- the reported "快速拉動" breakage. A grid with the headline
+        # diff pinned right and the extras on their own muted row wraps cleanly.
+        range_row = ctk.CTkFrame(rng, fg_color="transparent")
+        range_row.pack(fill="x")
+        range_row.grid_columnconfigure(0, weight=1)
+        range_row.grid_columnconfigure(1, weight=0)
+        ctk.CTkLabel(
+            range_row, text=f"{start_s} → {end_s}", font=_FONT_MONO, text_color=INK, anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            range_row, text=diff_s, font=_FONT_MONO, text_color=EXP_COLOR, anchor="e",
+        ).grid(row=0, column=1, sticky="e")
+        # Efficiency + percentage: muted, on their own row. The headline number
+        # stays the diff above.
+        extras: list[str] = []
         if pct_diff is not None:
-            ctk.CTkLabel(rng, text=f" (+{pct_diff:.2f}%)", font=_FONT_MONO_SM, text_color=INK_DIM).pack(side="left")
-        # Efficiency: EXP per minute of session time, in the same muted
-        # style as the percentage -- the headline number stays the diff.
+            extras.append(f"+{pct_diff:.2f}%")
         epm = summary.exp_per_min
         if epm is not None:
+            extras.append(f"{epm:,.0f}/{self._t('unit_min_short')}")
+        if extras:
             ctk.CTkLabel(
-                rng, text=f"  {epm:,.0f}/{self._t('unit_min_short')}",
-                font=_FONT_MONO_SM, text_color=INK_DIM,
-            ).pack(side="left")
+                rng, text="  ".join(extras), font=_FONT_MONO_SM, text_color=INK_DIM, anchor="w",
+            ).pack(fill="x", pady=(2, 0))
 
         mini = ctk.CTkFrame(card, fg_color="transparent")
         mini.pack(fill="x", padx=12, pady=(0, 10))
@@ -1757,7 +1810,14 @@ class OverlayApp:
     # ---- render --------------------------------------------------------
 
     def _render(self, snap: StatSnapshot) -> None:
-        self._map_value_label.configure(text=self._settings.map_name or "--")
+        # Map field: when unset show an obvious "click to enter" placeholder in
+        # the accent colour (distinct from the plain '--' every other field
+        # shows), so it's clear this field is user-fillable -- not just another
+        # unread value. The hand cursor is already bound at build time.
+        if self._settings.map_name:
+            self._map_value_label.configure(text=self._settings.map_name, text_color=INK)
+        else:
+            self._map_value_label.configure(text=self._t("kv_map_placeholder"), text_color=ACCENT)
 
         self._value_labels["level"].configure(text=str(snap.level) if snap.level is not None else "--")
 
