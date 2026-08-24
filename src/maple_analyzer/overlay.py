@@ -51,7 +51,7 @@ from PIL import Image
 
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
-from .parser import StatSnapshot, find_meso_candidate, find_stat_fields, parse_fields
+from .parser import StatSnapshot, find_meso_candidate, find_meso_in_region, find_stat_fields, parse_fields
 from .rate import Session, SessionSummary
 from .settings import Settings
 
@@ -197,6 +197,79 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
     )
 
 
+class _RegionSelector:
+    """Fullscreen, semi-transparent, topmost overlay for marking a screen
+    rectangle by dragging the mouse. On release it stores the rectangle in
+    screen pixels on `.result` and destroys itself; Esc cancels (result stays
+    None). The caller blocks on `root.wait_window(selector.top)` and then
+    reads `.result`."""
+
+    def __init__(self, root, title: str, hint: str):
+        self.result: tuple[int, int, int, int] | None = None
+        self.top = tk.Toplevel(root)
+        self.top.title(title)
+        self.top.attributes("-fullscreen", True)
+        self.top.attributes("-topmost", True)
+        # ~25% opaque: the game shows through dimmed, and the red selection
+        # rectangle stays visible on top.
+        self.top.attributes("-alpha", 0.25)
+        self.top.configure(bg="black", cursor="crosshair")
+        self._canvas = tk.Canvas(self.top, bg="black", highlightthickness=0, cursor="crosshair")
+        self._canvas.pack(fill="both", expand=True)
+        self._start: tuple[int, int] | None = None
+        self._rect_id: int | None = None
+        self.top.update_idletasks()
+        self._canvas.create_text(
+            self._canvas.winfo_width() // 2, 40, anchor="n", fill="#ffcc00",
+            text=f"{title}\n{hint}", font=("Microsoft JhengHei", 18, "bold"),
+        )
+        self._canvas.bind("<ButtonPress-1>", self._on_press)
+        self._canvas.bind("<B1-Motion>", self._on_drag)
+        self._canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.top.bind("<Escape>", lambda _e: self._finish(None))
+        try:
+            self.top.grab_set()
+        except Exception:
+            pass
+        self.top.focus_force()
+
+    def _on_press(self, event) -> None:
+        self._start = (event.x, event.y)
+        if self._rect_id is not None:
+            self._canvas.delete(self._rect_id)
+        self._rect_id = self._canvas.create_rectangle(
+            event.x, event.y, event.x, event.y, outline="#ff2222", width=3,
+        )
+
+    def _on_drag(self, event) -> None:
+        if self._start is None or self._rect_id is None:
+            return
+        x0, y0 = self._start
+        self._canvas.coords(self._rect_id, x0, y0, event.x, event.y)
+
+    def _on_release(self, event) -> None:
+        if self._start is None:
+            self._finish(None)
+            return
+        x0, y0 = self._start
+        left, right = sorted((x0, event.x))
+        top, bottom = sorted((y0, event.y))
+        if right - left < 12 or bottom - top < 12:
+            self._finish(None)  # too small: accidental click, cancel
+            return
+        ox = self._canvas.winfo_rootx()
+        oy = self._canvas.winfo_rooty()
+        self._finish((ox + left, oy + top, ox + right, oy + bottom))
+
+    def _finish(self, region) -> None:
+        self.result = region
+        try:
+            self.top.grab_release()
+        except Exception:
+            pass
+        self.top.destroy()
+
+
 class OverlayApp:
     def __init__(self, source: PanelSource):
         self._source = source
@@ -252,6 +325,10 @@ class OverlayApp:
         # Detected meso counter box (fractions), refreshed every locate pass
         # so a dragged inventory window or a zoom change self-corrects.
         self._meso_box: tuple[float, float, float, float] | None = None
+        # Manual-region capture source (see settings.manual_*): built lazily
+        # when the user marks regions and toggles manual mode on, and used by
+        # _active_source() in place of the auto GameWindowCapture.
+        self._manual_source = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -377,6 +454,7 @@ class OverlayApp:
         # simpler and this only happens on an explicit language switch, and
         # _append_history_card already picks up the new language/font.
         self._rebuild_history_cards()
+        self._refresh_manual_status()
 
         self._render(self._last)  # refreshes status pill / timer text immediately
 
@@ -663,6 +741,46 @@ class OverlayApp:
             "settings_track_meso_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
 
+        # MANUAL POSITION: mark the status bar and the meso counter with the
+        # mouse so the HUD OCRs those exact screen regions -- what makes it
+        # work under a screen magnifier (Magpie), where the game window's own
+        # rect no longer matches what is visible on screen.
+        manual_card = ctk.CTkFrame(scroll, fg_color=SURFACE, corner_radius=12)
+        manual_card.pack(fill="x", padx=2, pady=(4, 2))
+
+        self._i18n(
+            ctk.CTkLabel(manual_card, anchor="w", text_color=INK_DIM), "settings_manual", size=10, bold=True
+        ).pack(fill="x", padx=12, pady=(5, 0))
+
+        self._use_manual_var = tk.BooleanVar(value=self._settings.use_manual)
+        self._i18n(ctk.CTkSwitch(
+            manual_card, variable=self._use_manual_var, text_color=INK,
+            progress_color=ACCENT, button_color=INK_DIM, button_hover_color=ACCENT,
+            command=self._on_use_manual_changed,
+        ), "settings_use_manual", size=11, bold=False).pack(fill="x", padx=12, pady=(0, 3))
+
+        self._stat_region_button = ctk.CTkButton(
+            manual_card, command=self._on_set_stat_region,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
+            corner_radius=9, height=28,
+        )
+        self._i18n(self._stat_region_button, "settings_set_stat_region", size=11, bold=True)
+        self._stat_region_button.pack(fill="x", padx=12, pady=(0, 3))
+
+        self._meso_region_button = ctk.CTkButton(
+            manual_card, command=self._on_set_meso_region,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
+            corner_radius=9, height=28,
+        )
+        self._i18n(self._meso_region_button, "settings_set_meso_region", size=11, bold=True)
+        self._meso_region_button.pack(fill="x", padx=12, pady=(0, 3))
+
+        self._manual_status_label = ctk.CTkLabel(
+            manual_card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT,
+        )
+        self._manual_status_label.pack(fill="x", padx=12, pady=(0, 5))
+        self._refresh_manual_status()
+
     # ---- settings callbacks ------------------------------------------------
 
     def _on_scale_step(self, delta: int) -> None:
@@ -710,6 +828,68 @@ class OverlayApp:
         # The live tab's Meso row is gated on this setting (see
         # _apply_visibility) -- show/hide it immediately.
         self._apply_visibility()
+
+    def _rebuild_manual_source(self) -> None:
+        """Build/clear the manual-region capture source from the current
+        settings. Called whenever use_manual or a region changes."""
+        s = self._settings
+        if s.use_manual and s.manual_stat_region is not None:
+            from .capture import ManualScreenCapture
+
+            self._manual_source = ManualScreenCapture(s.manual_stat_region, s.manual_meso_region)
+        else:
+            self._manual_source = None
+
+    def _active_source(self):
+        """The capture source for this tick/locate pass: the manual screen
+        region source when manual mode is on, otherwise the auto source."""
+        return self._manual_source if self._manual_source is not None else self._source
+
+    def _refresh_manual_status(self) -> None:
+        """Update the settings status line to show whether each manual region
+        has been marked (with its screen coordinates when set)."""
+        s = self._settings
+
+        def line(region, set_key, unset_key) -> str:
+            if region is None:
+                return self._t(unset_key)
+            l, t, r, b = region
+            return f"{self._t(set_key)} ({l},{t})-({r},{b})"
+
+        self._manual_status_label.configure(text="\n".join([
+            line(s.manual_stat_region, "settings_stat_region_set", "settings_stat_region_unset"),
+            line(s.manual_meso_region, "settings_meso_region_set", "settings_meso_region_unset"),
+        ]))
+
+    def _on_use_manual_changed(self) -> None:
+        self._settings.use_manual = self._use_manual_var.get()
+        self._rebuild_manual_source()
+
+    def _on_set_stat_region(self) -> None:
+        self._select_region(self._on_stat_region_selected, "settings_set_stat_region")
+
+    def _on_set_meso_region(self) -> None:
+        self._select_region(self._on_meso_region_selected, "settings_set_meso_region")
+
+    def _on_stat_region_selected(self, region) -> None:
+        self._settings.manual_stat_region = region
+        self._refresh_manual_status()
+        self._rebuild_manual_source()
+
+    def _on_meso_region_selected(self, region) -> None:
+        self._settings.manual_meso_region = region
+        self._refresh_manual_status()
+        self._rebuild_manual_source()
+
+    def _select_region(self, callback, title_key: str) -> None:
+        """Open the fullscreen region selector and hand the result to `callback`
+        when the user finishes (None if they cancel). Blocks on wait_window.
+        Wrapped in _modal() so a session can't finalize mid-selection."""
+        with self._modal():
+            selector = _RegionSelector(self.root, self._t(title_key), self._t("region_selector_hint"))
+            self.root.wait_window(selector.top)
+            if selector.result is not None:
+                callback(selector.result)
 
     def _apply_visibility(self) -> None:
         s = self._settings
@@ -779,7 +959,7 @@ class OverlayApp:
                 # out of a single full-frame grab and OCR them recognition-
                 # only, exactly like grab_fields does for the fixed boxes.
                 # Detection boxes are tight, so pad each crop slightly.
-                frame = self._source.grab_full()
+                frame = self._active_source().grab_full()
                 fw, fh = frame.size
                 field_images = {}
                 for name, (fx, fy, fw2, fh2) in self._stat_boxes.items():
@@ -789,7 +969,7 @@ class OverlayApp:
                     h = max(1, int(fh2 * fh) + 4)
                     field_images[name] = frame.crop((x, y, min(fw, x + w), min(fh, y + h)))
             else:
-                field_images = self._source.grab_fields()
+                field_images = self._active_source().grab_fields()
         except RuntimeError as e:
             # Game window gone (closed/crashed), minimized, or the stat panel
             # is covered by another window -- don't crash the HUD, show it
@@ -822,7 +1002,7 @@ class OverlayApp:
         # without it can't explain a bad read -- and a mid-session resize is
         # exactly the kind of thing that moves the panel out from under the
         # boxes. Logged once at startup and again on any change.
-        client_size = getattr(self._source, "client_size", None)
+        client_size = getattr(self._active_source(), "client_size", None)
         if client_size is not None and client_size != self._last_client_size:
             self._log(f"[{time.strftime('%H:%M:%S')}] client size: {client_size[0]}x{client_size[1]}")
             self._last_client_size = client_size
@@ -894,17 +1074,6 @@ class OverlayApp:
 
         def _locate() -> None:
             try:
-                # Fresh capture on THIS thread: the shared mss/win32 handles
-                # live on the tick thread, and re-entering them from a second
-                # thread risks races. A new GameWindowCapture is cheap (one
-                # EnumWindows + one grab). On non-Windows (dev/tests) the
-                # shared source is a pure-PIL stand-in, safe to reuse.
-                if sys.platform == "win32":
-                    from .capture import GameWindowCapture
-
-                    frame = GameWindowCapture().grab_full()
-                else:
-                    frame = self._source.grab_full()
                 # Own OCR engine: the main instance is used by the tick
                 # thread concurrently, and RapidOCR is not documented
                 # thread-safe. Lazy-init here so the first pass's model
@@ -913,19 +1082,60 @@ class OverlayApp:
                 if locate_ocr is None:
                     locate_ocr = StatPanelOcr()
                     self._locate_ocr = locate_ocr
-                boxes = locate_ocr.detect_text(frame)
-                stat = find_stat_fields(boxes)
-                meso_found = find_meso_candidate(boxes, frame.size)
-                fw, fh = frame.size
-                stat_frac = {
-                    name: (x / fw, y / fh, w / fw, h / fh)
-                    for name, (x, y, w, h) in stat.items()
-                }
-                meso_frac = None
-                meso_value = None
-                if meso_found is not None:
-                    x, y, w, h, meso_value = meso_found
-                    meso_frac = (x / fw, y / fh, w / fw, h / fh)
+
+                s = self._settings
+                if s.use_manual and s.manual_stat_region is not None:
+                    # Manual mode: OCR the user-marked screen rectangles
+                    # directly (see ManualScreenCapture). The stat region is
+                    # subdivided by detection; the meso region is read
+                    # separately. Fresh capture on THIS thread.
+                    from .capture import ManualScreenCapture
+
+                    cap = ManualScreenCapture(s.manual_stat_region, s.manual_meso_region)
+                    frame = cap.grab_full()
+                    boxes = locate_ocr.detect_text(frame)
+                    stat = find_stat_fields(boxes)
+                    fw, fh = frame.size
+                    stat_frac = {
+                        name: (x / fw, y / fh, w / fw, h / fh)
+                        for name, (x, y, w, h) in stat.items()
+                    }
+                    meso_frac = None
+                    meso_value = None
+                    if s.manual_meso_region is not None:
+                        meso_frame = cap.grab_meso()
+                        mboxes = locate_ocr.detect_text(meso_frame)
+                        meso_found = find_meso_in_region(mboxes)
+                        if meso_found is not None:
+                            x, y, w, h, meso_value = meso_found
+                            mw, mh = meso_frame.size
+                            meso_frac = (x / mw, y / mh, w / mw, h / mh)
+                else:
+                    # Auto mode: fresh capture on THIS thread. The shared
+                    # mss/win32 handles live on the tick thread, and
+                    # re-entering them from a second thread risks races. A new
+                    # GameWindowCapture is cheap (one EnumWindows + one grab).
+                    # On non-Windows (dev/tests) the shared source is a
+                    # pure-PIL stand-in, safe to reuse.
+                    if sys.platform == "win32":
+                        from .capture import GameWindowCapture
+
+                        frame = GameWindowCapture().grab_full()
+                    else:
+                        frame = self._source.grab_full()
+                    boxes = locate_ocr.detect_text(frame)
+                    stat = find_stat_fields(boxes)
+                    meso_found = find_meso_candidate(boxes, frame.size)
+                    fw, fh = frame.size
+                    stat_frac = {
+                        name: (x / fw, y / fh, w / fw, h / fh)
+                        for name, (x, y, w, h) in stat.items()
+                    }
+                    meso_frac = None
+                    meso_value = None
+                    if meso_found is not None:
+                        x, y, w, h, meso_value = meso_found
+                        meso_frac = (x / fw, y / fh, w / fw, h / fh)
             except Exception:
                 stat_frac, meso_frac, meso_value = {}, None, None
             self.root.after(

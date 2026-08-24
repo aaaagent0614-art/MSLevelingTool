@@ -49,3 +49,13 @@ class Settings:
     # session ends; the first/last readings become the endpoints.
     # Default on per user request (2026-08-24).
     track_meso: bool = True
+    # Manual screen-region calibration (2026-08-24). When use_manual is on and
+    # manual_stat_region is set, the capture layer OCRs the user-marked screen
+    # rectangles directly via mss instead of locating the game window. This is
+    # what keeps the HUD reading correct values under a screen magnifier
+    # (Magpie): the game window's own client rect no longer matches what is
+    # visible on screen, but the user can draw a box around the actual status
+    # bar / meso counter and those screen pixels are exactly what we read.
+    manual_stat_region: tuple[int, int, int, int] | None = None  # (l, t, r, b) screen px
+    manual_meso_region: tuple[int, int, int, int] | None = None
+    use_manual: bool = False

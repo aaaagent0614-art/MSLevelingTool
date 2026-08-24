@@ -96,6 +96,24 @@ _STRINGS: dict[str, dict[Lang, str]] = {
         "en": "Open the inventory (I) once right after Start and once before the session ends; the meso counter is read both times.",
         "zh": "開始記錄後與結束前，各開一次道具欄（I），程式會讀取楓幣數字。",
     },
+    "settings_manual": {"en": "MANUAL POSITION", "zh": "手動設定位置"},
+    "settings_use_manual": {
+        "en": "Use manually marked positions", "zh": "使用手動標記的位置",
+    },
+    "settings_set_stat_region": {
+        "en": "Mark status bar position", "zh": "標記狀態列位置",
+    },
+    "settings_set_meso_region": {
+        "en": "Mark meso position", "zh": "標記楓幣位置",
+    },
+    "settings_stat_region_set": {"en": "Status bar: set", "zh": "狀態列：已設定"},
+    "settings_stat_region_unset": {"en": "Status bar: not set", "zh": "狀態列：未設定"},
+    "settings_meso_region_set": {"en": "Meso: set", "zh": "楓幣：已設定"},
+    "settings_meso_region_unset": {"en": "Meso: not set", "zh": "楓幣：未設定"},
+    "region_selector_hint": {
+        "en": "Drag to mark the area, release to confirm (Esc to cancel)",
+        "zh": "拖曳框選範圍，放開滑鼠完成（Esc 取消）",
+    },
 
     "unit_min": {"en": "min", "zh": "分鐘"},
     "unit_min_short": {"en": "m", "zh": "分"},

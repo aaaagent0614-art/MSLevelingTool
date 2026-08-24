@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from maple_analyzer.parser import find_meso_candidate, find_meso_from_boxes, find_stat_fields
+from maple_analyzer.parser import find_meso_candidate, find_meso_from_boxes, find_meso_in_region, find_stat_fields
 
 _DEJAVU = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 _BG = (10, 12, 18)
@@ -169,3 +169,31 @@ def test_ocr_roundtrip_reads_the_meso_number():
     frame = _game_like_frame()
     boxes = StatPanelOcr().detect_text(frame)
     assert find_meso_from_boxes(boxes, frame.size) == 154_821
+
+
+def test_find_meso_in_region_picks_largest_digit_blob():
+    """Within a user-marked meso region, the counter is the biggest pure-digit
+    blob; smaller item stack counts must not win."""
+    boxes = [
+        (5, 10, 30, 12, "12"),            # item stack count
+        (60, 8, 90, 16, "154,821"),       # the meso counter
+        (200, 20, 20, 10, "3"),           # another stack count
+    ]
+    assert find_meso_in_region(boxes) == (60, 8, 90, 16, 154_821)
+
+
+def test_find_meso_in_region_has_no_bottom_strip_filter():
+    """Unlike find_meso_candidate, a digit blob near the bottom of the marked
+    region is still eligible -- the region is already scoped to the counter."""
+    # The counter sits in the last few rows of the marked region.
+    boxes = [(10, 55, 60, 20, "99,999")]
+    assert find_meso_in_region(boxes) == (10, 55, 60, 20, 99_999)
+
+
+def test_find_meso_in_region_ignores_non_digit_text():
+    boxes = [(0, 0, 40, 12, "楓幣"), (50, 0, 40, 12, "MESO")]
+    assert find_meso_in_region(boxes) is None
+
+
+def test_find_meso_in_region_returns_none_when_empty():
+    assert find_meso_in_region([]) is None

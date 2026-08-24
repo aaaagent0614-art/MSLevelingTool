@@ -199,6 +199,35 @@ def find_meso_from_boxes(
     return found[4] if found is not None else None
 
 
+def find_meso_in_region(
+    boxes: list[tuple[int, int, int, int, str]],
+) -> tuple[int, int, int, int, int] | None:
+    """Pick the meso counter out of detection boxes inside a user-marked meso
+    region (see capture.ManualScreenCapture). Returns (x, y, w, h, value).
+
+    Unlike find_meso_candidate this has no bottom-strip filter or "ties break
+    toward the bottom" tie-break: the region is already scoped to the counter
+    by the user, so the rule is simply the pure-digit blob with the most
+    digits (item stack counts are smaller). None when nothing qualifies.
+    """
+    best: tuple[int, int, int, int, int, int] | None = None  # (ndigits, x, y, w, h, value)
+    for x, y, w, h, text in boxes:
+        stripped = text.strip()
+        if not _MESO_PURE_DIGIT_RE.match(stripped):
+            continue
+        digits = stripped.replace(",", "")
+        if not digits:
+            continue
+        value = int(digits)
+        if value > _MESO_MAX:
+            continue
+        if best is None or len(digits) > best[0]:
+            best = (len(digits), int(x), int(y), int(w), int(h), value)
+    if best is None:
+        return None
+    return best[1], best[2], best[3], best[4], best[5]
+
+
 def find_stat_fields(
     boxes: list[tuple[int, int, int, int, str]],
 ) -> dict[str, tuple[int, int, int, int]]:

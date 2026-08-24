@@ -98,6 +98,7 @@ class _StubApp:
         self._history_cards: list = []
         self._last = StatSnapshot(None, None, None, None, None, None, None)
         self._source = _StubSource()
+        self._manual_source = None
         self._ocr = _StubOcr()
         self._modal_open = False
         self._run_state = "stopped"
@@ -135,6 +136,7 @@ class _StubApp:
     _set_status_error = OverlayApp._set_status_error
     _log = staticmethod(OverlayApp._log)
     _modal = OverlayApp._modal
+    _active_source = OverlayApp._active_source
     _do_tick = OverlayApp._do_tick
     _render = OverlayApp._render
     _update_timer_label = OverlayApp._update_timer_label

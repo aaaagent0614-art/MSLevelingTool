@@ -305,6 +305,62 @@ class GameWindowCapture:
         return fields
 
 
+class ManualScreenCapture:
+    """Screen-region capture driven by user-marked rectangles (mss).
+
+    Used when the game runs under a screen magnifier (Magpie), where the game
+    window's own client rect no longer matches what is actually visible on
+    screen (Magpie renders a scaled copy into its own window). The user draws
+    a box around the status bar and one around the meso counter; we OCR
+    exactly those screen pixels, so the magnification factor is irrelevant.
+
+    grab_full() returns the status-bar region (what the locator + tick crop
+    from); grab_meso() returns the meso region. There are no fixed FIELD_BOXES
+    here -- the locator subdivides the stat region by detection, so grab_fields
+    returns nothing until then.
+    """
+
+    def __init__(
+        self,
+        stat_region: tuple[int, int, int, int],
+        meso_region: tuple[int, int, int, int] | None,
+    ):
+        if sys.platform != "win32":
+            raise RuntimeError("ManualScreenCapture requires Windows (mss + real desktop)")
+        import mss
+
+        self._mss = mss.mss()
+        self._stat_region = stat_region
+        self._meso_region = meso_region
+        left, top, right, bottom = stat_region
+        self.client_size = (right - left, bottom - top)
+
+    def _grab(self, region: tuple[int, int, int, int]) -> Image.Image:
+        left, top, right, bottom = region
+        shot = self._mss.grab(
+            {"left": left, "top": top, "width": right - left, "height": bottom - top}
+        )
+        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+    def grab_full(self) -> Image.Image:
+        return self._grab(self._stat_region)
+
+    def grab_meso(self) -> Image.Image:
+        if self._meso_region is None:
+            raise RuntimeError("no meso region set")
+        return self._grab(self._meso_region)
+
+    def grab_panel(self) -> Image.Image:
+        return self.grab_full()
+
+    def grab_fields(self) -> dict[str, Image.Image]:
+        # No fixed FIELD_BOXES in manual mode: the locator detection pass is
+        # what subdivides the stat region into LV/HP/MP/EXP. Return empty so
+        # the tick shows '--' until that pass lands instead of OCRing the whole
+        # bar as one string and parsing garbage.
+        return {}
+
+
 def get_capture(sample_path: str | Path | None = None) -> WindowCapture:
     if sample_path is not None:
         return StaticImageCapture(sample_path)
