@@ -121,9 +121,6 @@ if sys.platform == "win32":
         pass
 
 TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
-SCALE_STEP_PCT = 10
-SCALE_MIN_PCT = 50
-SCALE_MAX_PCT = 150
 # Background locator cadence. Each pass runs full-frame *detection* OCR
 # (~600ms+) in a daemon thread to re-find the stat panel fields and the
 # meso counter, so the tick thread only ever does cheap recognition reads
@@ -306,22 +303,25 @@ class OverlayApp:
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
-        # Applied before the window/widgets are built so the default window
-        # size below is already at the configured scale, not built at 100%
+        # Scale is locked at 120%. The reported "快速拉動" ghosting is driven by
+        # live widget/window rescaling combined with rapid window resizes; a
+        # fixed scale plus a non-resizable window removes both triggers. The
+        # size below is therefore already at 120% scale, not built at 100%
         # then rescaled after the fact.
-        ctk.set_widget_scaling(self._settings.scale_pct / 100)
-        ctk.set_window_scaling(self._settings.scale_pct / 100)
+        self._settings.scale_pct = 120
+        ctk.set_widget_scaling(1.2)
+        ctk.set_window_scaling(1.2)
 
         self.root = ctk.CTk()
         self.root.title("MsStatTractor")
         self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
         self.root.geometry("400x520+40+40")
-        # Minimum size so a quick drag of the resize handle can't collapse the
-        # window below what the History cards need -- the reported "快速拉動"
-        # breakage was the wide EXP-range row squeezing into a one-char-wide
-        # column when the window got too narrow (see _append_history_card).
+        # Fixed, non-resizable window -- resizing was the trigger for the
+        # ghosting artifacts (see the 120% scale lock above). minsize is moot
+        # once resizable is off but is kept as a harmless floor.
         self.root.minsize(340, 420)
+        self.root.resizable(False, False)
 
         # segmented_button_font is deliberately set to the same chrome font
         # as the rest of the UI: without it, CTkTabview falls back to
@@ -682,20 +682,9 @@ class OverlayApp:
             window_card, text=self._scale_header_text(),
             anchor="w", text_color=INK_DIM, font=self._font(11, bold=True),
         )
-        self._scale_header_label.pack(fill="x", padx=12, pady=(5, 0))
-        scale_row = ctk.CTkFrame(window_card, fg_color="transparent")
-        scale_row.pack(fill="x", padx=12, pady=(0, 3))
-        # A +/- stepper instead of a slider -- a small draggable handle at
-        # this widget size was fiddly to land on an exact value; discrete
-        # SCALE_STEP_PCT taps are precise and don't need fine motor control.
-        ctk.CTkButton(
-            scale_row, text="-", width=36, command=lambda: self._on_scale_step(-SCALE_STEP_PCT),
-            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK, font=self._font(11, bold=True),
-        ).pack(side="left")
-        ctk.CTkButton(
-            scale_row, text="+", width=36, command=lambda: self._on_scale_step(SCALE_STEP_PCT),
-            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK, font=self._font(11, bold=True),
-        ).pack(side="left", padx=(6, 0))
+        self._scale_header_label.pack(fill="x", padx=12, pady=(5, 3))
+        # Scale is locked at 120% (no +/- stepper) -- see the resize fix in
+        # __init__; the header label above states the fixed value.
 
         self._topmost_var = tk.BooleanVar(value=self._settings.topmost)
         self._i18n(ctk.CTkSwitch(
@@ -849,21 +838,6 @@ class OverlayApp:
 
     # ---- settings callbacks ------------------------------------------------
 
-    def _on_scale_step(self, delta: int) -> None:
-        pct = max(SCALE_MIN_PCT, min(SCALE_MAX_PCT, self._settings.scale_pct + delta))
-        if pct == self._settings.scale_pct:
-            return
-        self._settings.scale_pct = pct
-        self._scale_header_label.configure(text=self._scale_header_text())
-        # CTk's own scaling knobs: widget_scaling resizes fonts/padding/etc,
-        # window_scaling resizes the geometry set via .geometry() -- both are
-        # needed together, otherwise widgets end up mismatched against the
-        # window size. Both apply live to the already-open root window.
-        factor = pct / 100
-        ctk.set_widget_scaling(factor)
-        ctk.set_window_scaling(factor)
-        self._persist_settings()
-
     def _on_topmost_changed(self) -> None:
         self._settings.topmost = self._topmost_var.get()
         self.root.attributes("-topmost", self._settings.topmost)
@@ -990,13 +964,12 @@ class OverlayApp:
         return [self._t("settings_manual_detect_failed")]
 
     def _apply_detect_button_visibility(self) -> None:
-        """The 辨識 button only makes sense in manual mode -- hide it otherwise."""
+        """The 辨識 button is shown in both modes: manual mode re-runs the
+        marked-region detection; auto mode runs a one-shot auto locate so the
+        user can verify auto-detection works before falling back to manual."""
         if getattr(self, "_detect_button", None) is None:
             return
-        if self._settings.use_manual:
-            self._detect_button.grid()
-        else:
-            self._detect_button.grid_remove()
+        self._detect_button.grid()
 
     def _on_map_edit(self) -> None:
         with self._modal():
@@ -1288,6 +1261,46 @@ class OverlayApp:
         self._locate_thread = threading.Thread(target=_locate, daemon=True)
         self._locate_thread.start()
 
+    def _run_auto_detection(self) -> None:
+        """One-shot auto-mode detection, run synchronously on the main thread
+        (same safety model as _run_manual_detection). Grabs the full frame,
+        detects the stat fields + meso counter, and applies the result so the
+        user can confirm auto-detection works before switching to manual."""
+        self._status_pill.configure(
+            text=self._t("status_calibrating"), fg_color=SURFACE_2, text_color=EXP_COLOR,
+        )
+        self.root.update_idletasks()
+        stat_frac, meso_frac, meso_value = {}, None, None
+        try:
+            if sys.platform == "win32":
+                from .capture import GameWindowCapture
+
+                frame = GameWindowCapture().grab_full()
+            else:
+                frame = self._source.grab_full()
+            boxes = self._ocr.detect_text(frame)
+            stat = find_stat_fields(boxes)
+            meso_found = find_meso_candidate(boxes, frame.size)
+            fw, fh = frame.size
+            stat_frac = {
+                name: (x / fw, y / fh, w / fw, h / fh)
+                for name, (x, y, w, h) in stat.items()
+            }
+            if meso_found is not None:
+                x, y, w, h, meso_value = meso_found
+                meso_frac = (x / fw, y / fh, w / fw, h / fh)
+        except Exception:
+            stat_frac, meso_frac, meso_value = {}, None, None
+        self._apply_locate(stat_frac, meso_frac, meso_value)
+        # Judge the result by THIS pass's detections, not the (possibly stale)
+        # last-known-good boxes -- an auto-mode miss should read as "失敗".
+        if stat_frac:
+            self._detect_result_text = self._t("detect_result_ok", n=len(stat_frac))
+        else:
+            self._detect_result_text = self._t("detect_result_fail")
+        self._detect_result_until = time.time() + 3.0
+        self._render(self._last)
+
     def _run_manual_detection(self) -> None:
         """One-shot manual-mode detection, run synchronously on the main thread.
 
@@ -1343,8 +1356,12 @@ class OverlayApp:
         self._render(self._last)
 
     def _on_detect_clicked(self) -> None:
-        """Manual "辨識" button: force a fresh detection of the marked regions."""
-        self._run_manual_detection()
+        """辨識 button: manual mode re-detects the marked regions; auto mode runs
+        a one-shot full-frame locate to confirm auto-detection works."""
+        if self._settings.use_manual:
+            self._run_manual_detection()
+        else:
+            self._run_auto_detection()
 
     def _apply_locate(
         self,
@@ -1929,7 +1946,18 @@ class OverlayApp:
 
         pct = f"  ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None and self._settings.show_exp_pct else ""
         if snap.exp_cur is not None:
-            self._value_labels["exp"].configure(text=f"{snap.exp_cur:,}{pct}")
+            # Show cumulative EXP (session start + gained) instead of the
+            # per-level counter the game resets to ~0 on level-up -- a reset
+            # read "0" and made the session look like it had lost its place.
+            # start_exp + exp_diff is monotonic across level-ups: before one
+            # it equals snap.exp_cur, after one it keeps climbing (exp_diff
+            # already banks the finished level via rate.py). The percentage
+            # suffix and the bar stay per-level: they describe the *current*
+            # level's progress, which is exactly what resets by design.
+            start_exp = self._session.start_exp
+            exp_diff = self._session.exp_diff
+            display_exp = (start_exp + exp_diff) if (start_exp is not None and exp_diff is not None) else snap.exp_cur
+            self._value_labels["exp"].configure(text=f"{display_exp:,}{pct}")
             if snap.exp_pct is not None:
                 self._bars["exp"].set(max(0.0, min(1.0, snap.exp_pct / 100)))
         else:
