@@ -303,24 +303,21 @@ class OverlayApp:
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
-        # Scale is locked at 120%. The reported "快速拉動" ghosting is driven by
-        # live widget/window rescaling combined with rapid window resizes; a
-        # fixed scale plus a non-resizable window removes both triggers. The
-        # size below is therefore already at 120% scale, not built at 100%
-        # then rescaled after the fact.
+        # 120% content via widget scaling ONLY. set_window_scaling is
+        # deliberately NOT used: it rescales Tk's coordinate system, and during
+        # a window drag the widgets repaint against the wrong geometry, which is
+        # the "文字重疊" ghosting reported 2026-08-25. Widget scaling merely
+        # multiplies font/padding sizes, which is safe. The window is sized for
+        # the 120% widgets (400x520 * 1.2) directly, not via a scaling factor.
         self._settings.scale_pct = 120
         ctk.set_widget_scaling(1.2)
-        ctk.set_window_scaling(1.2)
 
         self.root = ctk.CTk()
         self.root.title("MsStatTractor")
         self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
-        self.root.geometry("400x520+40+40")
-        # Fixed, non-resizable window -- resizing was the trigger for the
-        # ghosting artifacts (see the 120% scale lock above). minsize is moot
-        # once resizable is off but is kept as a harmless floor.
-        self.root.minsize(340, 420)
+        self.root.geometry("480x624+40+40")
+        # Fixed, non-resizable window.
         self.root.resizable(False, False)
 
         # segmented_button_font is deliberately set to the same chrome font
@@ -1280,7 +1277,7 @@ class OverlayApp:
                 frame = self._source.grab_full()
             boxes = self._ocr.detect_text(frame)
             stat = find_stat_fields(boxes)
-            meso_found = find_meso_candidate(boxes, frame.size)
+            meso_found = find_meso_candidate(boxes, frame.size) if self._settings.track_meso else None
             fw, fh = frame.size
             stat_frac = {
                 name: (x / fw, y / fh, w / fw, h / fh)
@@ -1292,13 +1289,7 @@ class OverlayApp:
         except Exception:
             stat_frac, meso_frac, meso_value = {}, None, None
         self._apply_locate(stat_frac, meso_frac, meso_value)
-        # Judge the result by THIS pass's detections, not the (possibly stale)
-        # last-known-good boxes -- an auto-mode miss should read as "失敗".
-        if stat_frac:
-            self._detect_result_text = self._t("detect_result_ok", n=len(stat_frac))
-        else:
-            self._detect_result_text = self._t("detect_result_fail")
-        self._detect_result_until = time.time() + 3.0
+        self._set_detect_result(stat_frac, meso_frac)
         self._render(self._last)
 
     def _run_manual_detection(self) -> None:
@@ -1335,7 +1326,7 @@ class OverlayApp:
                 name: (x / fw, y / fh, w / fw, h / fh)
                 for name, (x, y, w, h) in stat.items()
             }
-            if s.manual_meso_region is not None:
+            if s.track_meso and s.manual_meso_region is not None:
                 meso_frame = cap.grab_meso()
                 mboxes = self._ocr.detect_text(meso_frame)
                 meso_found = find_meso_in_region(mboxes)
@@ -1346,13 +1337,7 @@ class OverlayApp:
         except Exception:
             stat_frac, meso_frac, meso_value = {}, None, None
         self._apply_locate(stat_frac, meso_frac, meso_value)
-        # Surface the result on the dashboard status pill for a few seconds
-        # (see _render's timed override) -- no need to dig into Settings.
-        if self._stat_boxes:
-            self._detect_result_text = self._t("detect_result_ok", n=len(self._stat_boxes))
-        else:
-            self._detect_result_text = self._t("detect_result_fail")
-        self._detect_result_until = time.time() + 3.0
+        self._set_detect_result(stat_frac, meso_frac)
         self._render(self._last)
 
     def _on_detect_clicked(self) -> None:
@@ -1362,6 +1347,22 @@ class OverlayApp:
             self._run_manual_detection()
         else:
             self._run_auto_detection()
+
+    def _set_detect_result(self, stat_frac: dict, meso_frac) -> None:
+        """Set the timed status-pill text after a 辨識 pass, reflecting both the
+        stat-field result and -- when meso tracking is on -- whether the meso
+        counter was found. The meso counter only exists while the inventory is
+        open, so a miss prompts the user to open it."""
+        n = len(stat_frac)
+        if not stat_frac:
+            self._detect_result_text = self._t("detect_result_fail")
+        elif not self._settings.track_meso:
+            self._detect_result_text = self._t("detect_result_ok", n=n)
+        elif meso_frac is not None:
+            self._detect_result_text = self._t("detect_result_ok_meso", n=n)
+        else:
+            self._detect_result_text = self._t("detect_result_meso_missing", n=n)
+        self._detect_result_until = time.time() + 3.0
 
     def _apply_locate(
         self,

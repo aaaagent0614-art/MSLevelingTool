@@ -132,6 +132,11 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "detect_button": {"en": "Detect", "zh": "辨識"},
     "detect_result_ok": {"en": "Detected {n}/4 fields", "zh": "偵測到 {n}/4 欄位"},
     "detect_result_fail": {"en": "Detection failed — re-mark it", "zh": "偵測失敗，請重新標記"},
+    "detect_result_ok_meso": {"en": "Detected {n}/4 fields + meso", "zh": "偵測到 {n}/4 欄位＋楓幣"},
+    "detect_result_meso_missing": {
+        "en": "Detected {n}/4 fields — open inventory (I)",
+        "zh": "偵測到 {n}/4 欄位，請開啟道具欄（I）",
+    },
     "update_available": {"en": "New version v{ver} available", "zh": "有新版本 v{ver} 可下載"},
     "meso_hint": {"en": "Meso: press I to open inventory", "zh": "楓幣：按 I 開啟道具欄讀取"},
     "settings_notify_on_stop": {"en": "Alert when a session ends", "zh": "紀錄結束時提醒（音效）"},
