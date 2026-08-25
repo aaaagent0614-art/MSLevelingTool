@@ -9,3 +9,7 @@ customtkinter
 
 # Windows-only: window enumeration / client-rect lookup for targeted capture.
 pywin32; sys_platform == "win32"
+
+# Windows-only: Windows Graphics Capture (occlusion-proof, captures DirectX
+# game frames that PrintWindow can't). Requires opencv-python (full) on Windows.
+windows-capture; sys_platform == "win32"

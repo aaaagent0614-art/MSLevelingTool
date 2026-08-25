@@ -98,6 +98,11 @@ class GameWindowCapture:
         # useful number when diagnosing a bad read from a log after the fact
         # -- and the one thing missing from every capture taken so far.
         self.client_size: tuple[int, int] | None = None
+        # WGC (Windows Graphics Capture) availability, probed lazily on the
+        # first grab. WGC reads the window's own composited frame -- occlusion
+        # proof AND able to capture DirectX games (PrintWindow returns black for
+        # MapleStory's D3D surface). None = not yet probed.
+        self._wgc_available: bool | None = None
 
     def _owning_process_name(self, hwnd: int) -> str:
         # Title alone isn't a reliable match: e.g. a browser tab for a wiki page
@@ -272,9 +277,139 @@ class GameWindowCapture:
         shot = mss.mss().grab({"left": left, "top": top, "width": right, "height": bottom})
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
+    def _probe_wgc(self) -> bool:
+        """Lazily check whether the `windows-capture` library is importable.
+        Only meaningful on Windows; always False elsewhere (dev/tests)."""
+        if self._wgc_available is None:
+            self._wgc_available = False
+            if sys.platform == "win32":
+                try:
+                    import windows_capture  # noqa: F401
+
+                    self._wgc_available = True
+                except Exception:
+                    pass
+        return self._wgc_available
+
+    def _client_relative_crop(
+        self, hwnd: int, frame_w: int, frame_h: int
+    ) -> tuple[int, int, int, int] | None:
+        """Locate the client area inside a full-window WGC frame, which can
+        include the title bar + borders. Returns (x, y, w, h) in frame pixels,
+        or None if the client rect can't be resolved (minimized, etc.)."""
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        dwmapi = ctypes.windll.dwmapi
+        dwmapi.DwmGetWindowAttribute.argtypes = [
+            wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+        ]
+        dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+        try:
+            win_rect = wintypes.RECT()
+            DWMWA_EXTENDED_FRAME_BOUNDS = 9
+            res = dwmapi.DwmGetWindowAttribute(
+                wintypes.HWND(hwnd),
+                wintypes.DWORD(DWMWA_EXTENDED_FRAME_BOUNDS),
+                ctypes.byref(win_rect),
+                ctypes.sizeof(win_rect),
+            )
+            if res != 0:
+                user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(win_rect))
+            client_rect = wintypes.RECT()
+            client_pt = wintypes.POINT(0, 0)
+            user32.GetClientRect(wintypes.HWND(hwnd), ctypes.byref(client_rect))
+            user32.ClientToScreen(wintypes.HWND(hwnd), ctypes.byref(client_pt))
+            client_w = client_rect.right - client_rect.left
+            client_h = client_rect.bottom - client_rect.top
+            if client_w <= 10 or client_h <= 10:
+                return None
+            offset_x = max(0, client_pt.x - win_rect.left)
+            offset_y = max(0, client_pt.y - win_rect.top)
+            crop_x = min(offset_x, max(0, frame_w - 1))
+            crop_y = min(offset_y, max(0, frame_h - 1))
+            crop_w = min(client_w, frame_w - crop_x)
+            crop_h = min(client_h, frame_h - crop_y)
+            if crop_w < 10 or crop_h < 10:
+                return None
+            return (crop_x, crop_y, crop_w, crop_h)
+        except Exception:
+            return None
+
+    def _try_wgc_frame(self, hwnd: int) -> Image.Image | None:
+        """Grab a single frame via Windows Graphics Capture. Returns None on any
+        failure (library missing, window minimized, WGC denied, black frame) so
+        grab_full() falls back to PrintWindow / mss."""
+        if not self._probe_wgc():
+            return None
+        import threading
+
+        import numpy as np
+        import windows_capture
+
+        result: dict = {}
+        event = threading.Event()
+        try:
+            capture = windows_capture.WindowsCapture(
+                cursor_capture=True, draw_border=False, window_hwnd=hwnd,
+            )
+        except Exception:
+            return None
+
+        @capture.event
+        def on_frame_arrived(frame, control):
+            try:
+                bgr_obj = frame.convert_to_bgr()
+                bgr = getattr(bgr_obj, "frame_buffer", bgr_obj)
+                if isinstance(bgr, np.ndarray) and bgr.size > 0:
+                    # Copy immediately: the array is a view into the native
+                    # mapped frame, which is freed once the capture stops.
+                    bgr = np.ascontiguousarray(bgr)
+                    fh, fw = bgr.shape[:2]
+                    crop = self._client_relative_crop(hwnd, fw, fh)
+                    if crop is not None:
+                        x, y, cw, ch = crop
+                        bgr = np.ascontiguousarray(bgr[y:y + ch, x:x + cw])
+                    result["bgr"] = bgr
+            except Exception:
+                pass
+            finally:
+                try:
+                    control.stop()
+                except Exception:
+                    pass
+                event.set()
+
+        @capture.event
+        def on_closed():
+            event.set()
+
+        try:
+            control = capture.start_free_threaded()
+            event.wait(timeout=2.0)
+            try:
+                control.stop()
+            except Exception:
+                pass
+        except Exception:
+            return None
+
+        bgr = result.get("bgr")
+        if bgr is None:
+            return None
+        rgb = bgr[:, :, ::-1]  # BGR -> RGB
+        img = Image.fromarray(np.ascontiguousarray(rgb))
+        return img if img.getbbox() is not None else None
+
     def grab_full(self) -> Image.Image:
         hwnd, cw, ch = self._window_geometry()
-        img = self._print_window(hwnd, cw, ch)
+        img = self._try_wgc_frame(hwnd)
+        if img is None:
+            img = self._print_window(hwnd, cw, ch)
         if img is None:
             img = self._screen_fallback()
         self.client_size = img.size

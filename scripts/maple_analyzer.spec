@@ -18,7 +18,7 @@ datas = []
 binaries = []
 hiddenimports = []
 
-for pkg in ("customtkinter", "rapidocr_onnxruntime"):
+for pkg in ("customtkinter", "rapidocr_onnxruntime", "windows_capture"):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(pkg)
     datas += pkg_datas
     binaries += pkg_binaries
@@ -28,8 +28,9 @@ for pkg in ("customtkinter", "rapidocr_onnxruntime"):
 # GameWindowCapture.__init__ (they only exist on Windows), so list them
 # explicitly rather than relying on PyInstaller's bytecode scan to spot the
 # imports. (PrintWindow's GDI work uses ctypes, not win32ui, so there is no
-# MFC/mfc140u.dll dependency to bundle.)
-hiddenimports += ["win32gui", "win32api", "win32con", "win32process"]
+# MFC/mfc140u.dll dependency to bundle.) windows_capture is likewise imported
+# dynamically (inside _try_wgc_frame), so pin it as a hidden import too.
+hiddenimports += ["win32gui", "win32api", "win32con", "win32process", "windows_capture"]
 
 a = Analysis(
     [str(repo_root / "scripts" / "run_overlay.py")],
