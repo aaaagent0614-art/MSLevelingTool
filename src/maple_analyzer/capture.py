@@ -24,6 +24,8 @@ for demos/tests on Windows too).
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -78,7 +80,12 @@ class GameWindowCapture:
     """Real capture: locates the game window by title and reads its own
     rendered frame via PrintWindow(PW_RENDERFULLCONTENT)."""
 
-    def __init__(self, title_substring: str = "新楓之谷", process_name: str = "Maplestory"):
+    def __init__(
+        self,
+        title_substring: str = "新楓之谷",
+        process_name: str = "Maplestory",
+        continuous: bool = False,
+    ):
         if sys.platform != "win32":
             raise RuntimeError("GameWindowCapture requires Windows (pywin32 + real desktop)")
         import win32api
@@ -103,6 +110,15 @@ class GameWindowCapture:
         # proof AND able to capture DirectX games (PrintWindow returns black for
         # MapleStory's D3D surface). None = not yet probed.
         self._wgc_available: bool | None = None
+        # Continuous-capture mode (used by the persistent instance the tick
+        # loop drives): a daemon thread keeps ONE WGC session alive and caches
+        # the latest client-area frame, so grab_full() never blocks the UI
+        # thread on a per-tick session create/wait/teardown (the lag fix).
+        self._continuous = continuous
+        self._stream_lock = threading.Lock()
+        self._stream_frame: Image.Image | None = None
+        self._stream_thread: threading.Thread | None = None
+        self._stream_stop = threading.Event()
 
     def _owning_process_name(self, hwnd: int) -> str:
         # Title alone isn't a reliable match: e.g. a browser tab for a wiki page
@@ -405,13 +421,107 @@ class GameWindowCapture:
         img = Image.fromarray(np.ascontiguousarray(rgb))
         return img if img.getbbox() is not None else None
 
+    # ---- continuous capture stream (lag fix) ----------------------------
+
+    def _ensure_stream(self) -> None:
+        """Start the background WGC stream if it isn't already running."""
+        if not self._continuous or not self._probe_wgc():
+            return
+        if self._stream_thread is not None and self._stream_thread.is_alive():
+            return
+        self._stream_stop.clear()
+        self._stream_thread = threading.Thread(
+            target=self._stream_loop, daemon=True, name="wgc-stream",
+        )
+        self._stream_thread.start()
+
+    def _read_stream_frame(self) -> Image.Image | None:
+        with self._stream_lock:
+            return self._stream_frame
+
+    def _stream_loop(self) -> None:
+        """Keep (re)starting the WGC session, re-finding the game window on each
+        iteration so a minimize/restore or a window recreation recovers."""
+        while not self._stream_stop.is_set():
+            try:
+                hwnd = self._find_window()
+                if self._win32gui.IsIconic(hwnd):
+                    time.sleep(0.3)
+                    continue
+                self._run_wgc_stream(hwnd)
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+    def _run_wgc_stream(self, hwnd: int) -> None:
+        """Run one WGC capture session until it closes or the stream stops,
+        caching the latest client-area frame under _stream_lock."""
+        import numpy as np
+        import windows_capture
+
+        try:
+            capture = windows_capture.WindowsCapture(
+                cursor_capture=True, draw_border=False, window_hwnd=hwnd,
+            )
+        except Exception:
+            return
+
+        closed = threading.Event()
+
+        @capture.event
+        def on_frame_arrived(frame, control):
+            try:
+                bgr_obj = frame.convert_to_bgr()
+                bgr = getattr(bgr_obj, "frame_buffer", bgr_obj)
+                if isinstance(bgr, np.ndarray) and bgr.size > 0:
+                    # Copy immediately: a view into the native mapped frame,
+                    # which is freed once the next frame arrives / capture stops.
+                    bgr = np.ascontiguousarray(bgr)
+                    fh, fw = bgr.shape[:2]
+                    crop = self._client_relative_crop(hwnd, fw, fh)
+                    if crop is not None:
+                        x, y, cw, ch = crop
+                        bgr = np.ascontiguousarray(bgr[y:y + ch, x:x + cw])
+                    rgb = bgr[:, :, ::-1]
+                    img = Image.fromarray(np.ascontiguousarray(rgb))
+                    with self._stream_lock:
+                        self._stream_frame = img
+            except Exception:
+                pass
+
+        @capture.event
+        def on_closed():
+            with self._stream_lock:
+                self._stream_frame = None
+            closed.set()
+
+        try:
+            control = capture.start_free_threaded()
+        except Exception:
+            return
+
+        while not closed.is_set() and not self._stream_stop.is_set():
+            time.sleep(0.1)
+        try:
+            control.stop()
+        except Exception:
+            pass
+
     def grab_full(self) -> Image.Image:
         hwnd, cw, ch = self._window_geometry()
-        img = self._try_wgc_frame(hwnd)
-        if img is None:
-            img = self._print_window(hwnd, cw, ch)
-        if img is None:
-            img = self._screen_fallback()
+        if self._continuous:
+            self._ensure_stream()
+            img = self._read_stream_frame()
+            if img is None:
+                img = self._print_window(hwnd, cw, ch)
+            if img is None:
+                img = self._screen_fallback()
+        else:
+            img = self._try_wgc_frame(hwnd)
+            if img is None:
+                img = self._print_window(hwnd, cw, ch)
+            if img is None:
+                img = self._screen_fallback()
         self.client_size = img.size
         return img
 

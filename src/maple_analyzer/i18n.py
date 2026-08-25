@@ -132,6 +132,10 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "detect_button": {"en": "Detect", "zh": "辨識"},
     "detect_result_ok": {"en": "Detected {n}/4 fields", "zh": "偵測到 {n}/4 欄位"},
     "detect_result_fail": {"en": "Detection failed — re-mark it", "zh": "偵測失敗，請重新標記"},
+    "detect_result_ok_partial": {
+        "en": "Detected {n}/4 fields (missing {missing})",
+        "zh": "偵測到 {n}/4 欄位（缺 {missing}）",
+    },
     "detect_result_ok_meso": {"en": "Detected {n}/4 fields + meso", "zh": "偵測到 {n}/4 欄位＋楓幣"},
     "detect_result_meso_missing": {
         "en": "Detected {n}/4 fields — open inventory (I)",

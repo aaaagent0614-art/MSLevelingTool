@@ -14,5 +14,5 @@ from maple_analyzer.capture import GameWindowCapture
 from maple_analyzer.overlay import OverlayApp
 
 if __name__ == "__main__":
-    app = OverlayApp(GameWindowCapture())
+    app = OverlayApp(GameWindowCapture(continuous=True))
     app.run()

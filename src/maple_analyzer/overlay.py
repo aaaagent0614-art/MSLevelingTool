@@ -1354,8 +1354,15 @@ class OverlayApp:
         counter was found. The meso counter only exists while the inventory is
         open, so a miss prompts the user to open it."""
         n = len(stat_frac)
+        missing = [f for f in ("LV", "HP", "MP", "EXP") if f not in stat_frac]
         if not stat_frac:
             self._detect_result_text = self._t("detect_result_fail")
+        elif missing:
+            # Partial: name the missing field(s) -- "3/4" alone doesn't tell
+            # the user which one failed (reported 2026-08-25).
+            self._detect_result_text = self._t(
+                "detect_result_ok_partial", n=n, missing="、".join(missing)
+            )
         elif not self._settings.track_meso:
             self._detect_result_text = self._t("detect_result_ok", n=n)
         elif meso_frac is not None:
