@@ -22,14 +22,14 @@ from .i18n import Lang
 
 def app_data_dir() -> Path:
     """Directory for persisted files: next to the exe when frozen (the
-    extracted MSLevelingTool folder), else the current working directory."""
+    extracted MsStatTractor folder), else the current working directory."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path.cwd()
 
 
 def settings_path() -> Path:
-    return app_data_dir() / "MSLevelingTool.settings.json"
+    return app_data_dir() / "MsStatTractor.settings.json"
 
 
 # The only non-JSON-native fields are the (l, t, r, b) screen-region tuples,
@@ -43,6 +43,8 @@ def save_settings(s: "Settings") -> None:
         for key in _REGION_FIELDS:
             value = data.get(key)
             data[key] = list(value) if value is not None else None
+        frac = data.get("auto_stat_frac")
+        data["auto_stat_frac"] = {k: list(v) for k, v in frac.items()} if frac else None
         settings_path().write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -57,6 +59,8 @@ def load_settings() -> "Settings":
         for key in _REGION_FIELDS:
             value = data.get(key)
             data[key] = tuple(value) if value is not None else None
+        frac = data.get("auto_stat_frac")
+        data["auto_stat_frac"] = {k: tuple(v) for k, v in frac.items()} if frac else None
         return Settings(**data)
     except Exception:
         # Missing/corrupt/old-format file -> fresh defaults.
@@ -104,6 +108,11 @@ class Settings:
     manual_stat_region: tuple[int, int, int, int] | None = None  # (l, t, r, b) screen px
     manual_meso_region: tuple[int, int, int, int] | None = None
     use_manual: bool = False
+    # Auto-mode last-known-good field positions, as fractions of the client
+    # frame: {'LV': (fx, fy, fw, fh), ...}. Persisted so a restart (or a
+    # transient OCR miss) reuses the real detected positions instead of the
+    # stale fixed reference boxes in regions.py. Only meaningful in auto mode.
+    auto_stat_frac: dict[str, tuple[float, float, float, float]] | None = None
     # Map name (2026-08-24). The dashboard shows a "地圖" field, typed by hand
     # (click the value to edit). Auto-OCR fill was removed (2026-08-25) at the
     # user's request -- the game's stylized banner font misread too often.

@@ -67,7 +67,7 @@ def _open_log_file():
         base = os.path.dirname(os.path.abspath(sys.executable))
     else:
         base = os.getcwd()
-    path = os.path.join(base, "MSLevelingTool.log")
+    path = os.path.join(base, "MsStatTractor.log")
     try:
         return open(path, "a", encoding="utf-8", errors="replace")
     except OSError:
@@ -77,7 +77,7 @@ def _open_log_file():
 def _history_path() -> str:
     """Where the session history persists (next to the exe when frozen, else
     the cwd)."""
-    return str(app_data_dir() / "MSLevelingTool.history.json")
+    return str(app_data_dir() / "MsStatTractor.history.json")
 
 # The console's codepage (e.g. cp950 Traditional Chinese) can't represent
 # every character OCR might misread out of the game's UI -- printing one
@@ -131,10 +131,6 @@ SCALE_MAX_PCT = 150
 # screen magnifiers (Megapipe): the detected positions track the rescaled
 # layout every pass.
 LOCATE_INTERVAL_TICKS = 10
-# Consecutive locator passes that fail to find the stat panel before
-# falling back to the fixed regions.FIELD_BOXES (transient OCR misses
-# shouldn't flap the tick between detected and fixed boxes).
-LOCATE_EMPTY_LIMIT = 3
 # How often (in ticks) manual mode re-reads the meso counter via cheap
 # recognition-only OCR on the marked meso region (~15ms) -- no detection, so
 # no CPU spike like the locator's periodic detection pass used to cause.
@@ -286,7 +282,6 @@ class OverlayApp:
         # {'LV': (fx, fy, fw, fh), ...}. None until the locator has found
         # the panel (tick falls back to regions.FIELD_BOXES meanwhile).
         self._stat_boxes: dict[str, tuple[float, float, float, float]] | None = None
-        self._locate_empty_count = 0
         # Detected meso counter box (fractions), refreshed every locate pass
         # so a dragged inventory window or a zoom change self-corrects.
         self._meso_box: tuple[float, float, float, float] | None = None
@@ -924,7 +919,12 @@ class OverlayApp:
         # Regions/toggle changed: invalidate the one-shot calibration and force
         # the next tick to re-run detection immediately.
         self._manual_calibrated = False
-        self._stat_boxes = None
+        if s.use_manual:
+            self._stat_boxes = None  # manual detection is one-shot; re-detect
+        else:
+            # Restore the persisted last-known-good auto positions (may be None
+            # on first run -> falls back to regions.FIELD_BOXES until detected).
+            self._stat_boxes = s.auto_stat_frac
         self._locate_ticks = LOCATE_INTERVAL_TICKS
 
     def _active_source(self):
@@ -1355,15 +1355,17 @@ class OverlayApp:
         """Main-thread half of the locator pass (see _try_locate)."""
         if stat_frac:
             self._stat_boxes = stat_frac
-            self._locate_empty_count = 0
-        else:
-            # Panel not found this pass (covered / not rendered). Keep the
-            # last known boxes for a few passes -- transient OCR misses
-            # shouldn't flap the tick between detected and fixed boxes --
-            # then fall back to regions.FIELD_BOXES until the panel returns.
-            self._locate_empty_count = getattr(self, "_locate_empty_count", 0) + 1
-            if self._locate_empty_count >= LOCATE_EMPTY_LIMIT:
-                self._stat_boxes = None
+            if not self._settings.use_manual:
+                # Persist the last-known-good auto positions so a restart (or
+                # a transient OCR miss) reuses the real detected boxes instead
+                # of the stale fixed reference boxes in regions.py.
+                self._settings.auto_stat_frac = dict(stat_frac)
+                self._persist_settings()
+        elif self._settings.use_manual:
+            # Manual one-shot detection found nothing: no boxes, tick shows '--'.
+            self._stat_boxes = None
+        # else: auto mode with a transient OCR miss -- keep the last-known-good
+        # boxes rather than flapping back to the fixed reference boxes.
 
         if meso_frac is not None:
             self._meso_box = meso_frac
@@ -1827,7 +1829,7 @@ class OverlayApp:
                 import urllib.request
 
                 with urllib.request.urlopen(
-                    "https://api.github.com/repos/aaaagent0614-art/MSLevelingTool/releases/latest",
+                    "https://api.github.com/repos/aaaagent0614-art/MsStatTractor/releases/latest",
                     timeout=6,
                 ) as resp:
                     data = json.loads(resp.read().decode("utf-8"))

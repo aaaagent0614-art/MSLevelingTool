@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-title MSLevelingTool 安裝與製作
+title MsStatTractor 安裝與製作
 cd /d "%~dp0"
 
 echo ============================================
-echo   MSLevelingTool 安裝與製作
+echo   MsStatTractor 安裝與製作
 echo   (第一次跑一次就好，約 5~15 分鐘)
 echo ============================================
 echo.
@@ -43,15 +43,10 @@ echo [3/4] 製作執行檔 ...
 call scripts\build_exe.bat
 if errorlevel 1 goto :err
 
-echo [4/4] 改名為 MSLevelingTool ...
-if exist "dist\MSLevelingTool" rmdir /s /q "dist\MSLevelingTool"
-ren "dist\MapleStoryAnalyzer" MSLevelingTool
-ren "dist\MSLevelingTool\MapleStoryAnalyzer.exe" MSLevelingTool.exe
-
 echo.
 echo ============================================
 echo   完成！你的工具在這裡：
-echo   %cd%\dist\MSLevelingTool\MSLevelingTool.exe
+echo   %cd%\dist\MsStatTractor\MsStatTractor.exe
 echo.
 echo   雙擊即可使用。第一次跳出 SmartScreen 警告，
 echo   請按「更多資訊 → 仍要執行」。

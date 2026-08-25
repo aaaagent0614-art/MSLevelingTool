@@ -1,11 +1,12 @@
 """Crop-box definitions for the stat panel and its fields.
 
-v1 approach: fixed pixel boxes, measured directly off samples/maple_story_ui.jpg
-(1351x800 client area). This is a placeholder for the spec's real plan (template-
-match a UI anchor icon, then derive boxes as anchor-relative offsets x scale factor
-so it survives resolution/DPI changes) -- see VERSIONS.md / spec-draft. Swap
-`locate_panel()` for a template-match implementation before relying on this outside
-dev/demo use at this exact resolution.
+These fixed pixel boxes (measured off samples/maple_story_ui.jpg at 1351x800)
+are a LAST-RESORT fallback only: auto mode normally locates the panel by OCR
+detection every pass and persists the detected fractional positions (see
+settings.auto_stat_frac), so it self-corrects under resolution/DPI/magnifier
+changes. FIELD_BOXES below are used only before the first successful detection
+(or if the user never runs auto mode). Manual mode doesn't use these at all --
+it OCRs the user-marked rectangles directly.
 """
 from __future__ import annotations
 

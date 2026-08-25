@@ -1,9 +1,9 @@
-# PyInstaller spec for the MapleStoryAnalyzer HUD.
+# PyInstaller spec for the MsStatTractor HUD.
 #
 # Build on Windows, from the repo root, inside the project venv:
 #   .venv\Scripts\pyinstaller scripts\maple_analyzer.spec --noconfirm
 #
-# Output: dist\MapleStoryAnalyzer\MapleStoryAnalyzer.exe (one-folder build --
+# Output: dist\MsStatTractor\MsStatTractor.exe (one-folder build --
 # faster startup than --onefile, and rapidocr's ONNX models are large enough
 # that unpacking them to a temp dir on every launch isn't worth it).
 
@@ -51,7 +51,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="MapleStoryAnalyzer",
+    name="MsStatTractor",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -68,5 +68,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="MapleStoryAnalyzer",
+    name="MsStatTractor",
 )

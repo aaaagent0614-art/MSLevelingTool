@@ -5,7 +5,7 @@ REM   (or double-click it from inside scripts\)
 REM
 REM Requires the venv already set up (see README "Installation") plus
 REM PyInstaller installed into it (pip install -r requirements-dev.txt).
-REM Output: dist\MapleStoryAnalyzer\MapleStoryAnalyzer.exe (relative to repo root)
+REM Output: dist\MsStatTractor\MsStatTractor.exe (relative to repo root)
 
 REM cd to the repo root regardless of where this .bat was invoked from.
 pushd "%~dp0.."
@@ -24,5 +24,5 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 echo.
-echo Build complete: dist\MapleStoryAnalyzer\MapleStoryAnalyzer.exe
+echo Build complete: dist\MsStatTractor\MsStatTractor.exe
 popd
