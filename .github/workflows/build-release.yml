@@ -55,3 +55,16 @@ jobs:
           files: ${{ steps.asset.outputs.zip }}
           prerelease: ${{ contains(github.ref_name, 'beta') }}
           fail_on_unmatched_files: false
+          # Release body 固定模板：沿用 v1.1.1 的寫法格式（## 章節標題、
+          # 粗體重點、- 項目符號、結尾 ## 下載）。版本號自動帶入目前 tag；
+          # 「更新內容」留空，發布後由維護者用 gh release edit 補當次功能。
+          body: |
+            ## ${{ github.ref_name }}
+
+            ## 更新內容
+
+            - （發布後補充）
+
+            ## 下載
+
+            解壓縮後雙擊 `MsStatTractor.exe`。

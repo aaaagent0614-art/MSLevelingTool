@@ -324,6 +324,11 @@ class OverlayApp:
         # merged snapshot every tick (see _apply_manual_overrides) until
         # cleared by another edit or a 辨識 pass re-reads the game.
         self._manual_overrides: dict[str, int] = {}
+        # Last meso counter value seen (any state). Lets the Dashboard's
+        # 起始楓幣 row show the freshly-detected value right after a 辨識 pass,
+        # before a session has started (see _render). Updated by the locator
+        # and the manual meso scan regardless of run_state.
+        self._last_meso: int | None = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -1617,6 +1622,8 @@ class OverlayApp:
 
         if meso_frac is not None:
             self._meso_box = meso_frac
+            if meso_value is not None:
+                self._last_meso = meso_value
             if self._run_state == "running" and meso_value is not None:
                 self._session.record_meso(meso_value)
                 self._render(self._last)  # show the updated meso rows promptly
@@ -1646,6 +1653,7 @@ class OverlayApp:
             text = self._ocr.read_field(img)
             value = parse_meso(text)
             if value is not None:
+                self._last_meso = value
                 self._session.record_meso(value)
                 self._render(self._last)
         except Exception:
@@ -2089,8 +2097,17 @@ class OverlayApp:
 
         head = ctk.CTkFrame(card, fg_color="transparent")
         head.pack(fill="x", padx=12, pady=(10, 0))
+        # Three columns so the duration lands dead-centre of the header row
+        # (per user request 2026-08-27): title/badges left, duration middle,
+        # action buttons right.
+        head.grid_columnconfigure(0, weight=1)
+        head.grid_columnconfigure(1, weight=0)
+        head.grid_columnconfigure(2, weight=1)
+
+        head_left = ctk.CTkFrame(head, fg_color="transparent")
+        head_left.grid(row=0, column=0, sticky="w")
         title_label = ctk.CTkLabel(
-            head, text=summary.name or self._t("history_session", n=index), font=self._font(10, bold=True),
+            head_left, text=summary.name or self._t("history_session", n=index), font=self._font(10, bold=True),
             text_color=INK_FAINT, cursor="hand2",
         )
         title_label.pack(side="left")
@@ -2102,7 +2119,7 @@ class OverlayApp:
             summary.start_time - self._settings.compare_start_time
         ) < 1e-6:
             ctk.CTkLabel(
-                head, text=self._t("history_compare_badge"), font=self._font(9, bold=True),
+                head_left, text=self._t("history_compare_badge"), font=self._font(9, bold=True),
                 text_color=ACCENT_INK, fg_color=ACCENT, corner_radius=6, padx=5, pady=1,
             ).pack(side="left", padx=(8, 0))
 
@@ -2111,15 +2128,25 @@ class OverlayApp:
         # *where* it was recorded. Omitted when the map was never set.
         if summary.map_name:
             ctk.CTkLabel(
-                head, text=summary.map_name, font=self._font(10, bold=True),
+                head_left, text=summary.map_name, font=self._font(10, bold=True),
                 text_color=ACCENT, fg_color=SURFACE_2, corner_radius=6, padx=6, pady=1,
             ).pack(side="left", padx=(8, 0))
 
-        # Packed before dur_text below so it lands rightmost -- pack(side="right")
-        # stacks from the outer edge inward in packing order, so whichever
-        # side="right" widget is packed first ends up furthest right.
+        dur_min = summary.duration_s / 60
+        # Duration shown as-is (e.g. "4.6分") -- the old early-restart
+        # annotation ("5.5分 / 5分，提前重啟") was removed per user request
+        # (2026-08-27): the session's own start→end time is the point, and
+        # the target interval is already visible on the timestamp line.
+        unit = self._t("unit_min_short")
+        dur_text, dur_color, dur_font = f"{dur_min:.1f}{unit}", INK_DIM, _FONT_MONO_SM
+        ctk.CTkLabel(head, text=dur_text, font=dur_font, text_color=dur_color).grid(row=0, column=1)
+
+        head_right = ctk.CTkFrame(head, fg_color="transparent")
+        head_right.grid(row=0, column=2, sticky="e")
+        # Packed first so it lands rightmost -- pack(side="right") stacks from
+        # the outer edge inward in packing order.
         ctk.CTkButton(
-            head, text="×", width=22, height=18, command=lambda i=index: self._on_delete_history_clicked(i),
+            head_right, text="×", width=22, height=18, command=lambda i=index: self._on_delete_history_clicked(i),
             fg_color="transparent", hover_color=SURFACE_2, text_color=INK_FAINT, font=_FONT_UI_BOLD,
         ).pack(side="right")
 
@@ -2130,22 +2157,13 @@ class OverlayApp:
             summary.start_time - self._settings.compare_start_time
         ) < 1e-6
         ctk.CTkButton(
-            head,
+            head_right,
             text=self._t("history_compare_unset_button" if is_base else "history_compare_button"),
             width=72, height=18, command=lambda i=index: self._on_compare_clicked(i),
             fg_color=TRACK_BG if is_base else SURFACE_2,
             hover_color=TRACK_BG, text_color=OK_COLOR if is_base else ACCENT,
             font=self._font(9, bold=True), corner_radius=6,
         ).pack(side="right", padx=(0, 4))
-
-        dur_min = summary.duration_s / 60
-        # Duration shown as-is (e.g. "4.6分") -- the old early-restart
-        # annotation ("5.5分 / 5分，提前重啟") was removed per user request
-        # (2026-08-27): the session's own start→end time is the point, and
-        # the target interval is already visible on the timestamp line.
-        unit = self._t("unit_min_short")
-        dur_text, dur_color, dur_font = f"{dur_min:.1f}{unit}", INK_DIM, _FONT_MONO_SM
-        ctk.CTkLabel(head, text=dur_text, font=dur_font, text_color=dur_color).pack(side="right")
 
         timestamp = ctk.CTkFrame(card, fg_color="transparent")
         timestamp.pack(fill="x", padx=12, pady=(0, 4))
@@ -2188,9 +2206,13 @@ class OverlayApp:
         mini.grid_columnconfigure((0, 1), weight=1, uniform="mini")
 
         def mini_stat(row: int, col: int, label: str, value: str, color: str, sub: str | None = None, sub_color: str = INK_DIM) -> None:
+            # Every cell renders exactly three lines (title / value / sub) so
+            # all four cells come out the same height even though the meso
+            # cell's sub carries the equip line (per user request 2026-08-27).
+            # Cells without a real sub line get a space placeholder.
             box = ctk.CTkFrame(mini, fg_color=SURFACE_2, corner_radius=7)
             box.grid(
-                row=row, column=col, sticky="ew",
+                row=row, column=col, sticky="nsew",
                 padx=(0 if col == 0 else 4, 0), pady=(0 if row == 0 else 4, 0),
             )
             ctk.CTkLabel(box, text=label, font=self._font(9, bold=True), text_color=INK_FAINT, anchor="w").pack(
@@ -2199,10 +2221,9 @@ class OverlayApp:
             ctk.CTkLabel(box, text=value, font=_FONT_MONO_SM, text_color=color, anchor="w").pack(
                 fill="x", padx=8, pady=(0, 6)
             )
-            if sub is not None:
-                ctk.CTkLabel(box, text=sub, font=_FONT_MONO_SM, text_color=sub_color, anchor="w").pack(
-                    fill="x", padx=8, pady=(0, 6)
-                )
+            ctk.CTkLabel(box, text=sub or " ", font=_FONT_MONO_SM, text_color=sub_color, anchor="w").pack(
+                fill="x", padx=8, pady=(0, 6)
+            )
 
         # 2x2 grid (per user request 2026-08-24): EXP top-left, meso top-right,
         # HP loss bottom-left, MP loss bottom-right.
@@ -2223,7 +2244,10 @@ class OverlayApp:
         equip_sub = None
         if summary.sale_meso:
             equip_sub = self._t("history_meso_equip", n=f"{summary.sale_meso:+,}")
-        mini_stat(0, 1, self._t("history_meso"), wild_s, wild_c, sub=equip_sub)
+        # Both meso lines share one colour (EXP_COLOR -- it's income, per
+        # user request 2026-08-27: 野生/裝備 size matches the other cells,
+        # colour unified).
+        mini_stat(0, 1, self._t("history_meso"), wild_s, wild_c, sub=equip_sub, sub_color=EXP_COLOR)
 
         mini_stat(1, 0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
         mini_stat(1, 1, self._t("history_mp_loss"), _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
@@ -2656,6 +2680,11 @@ class OverlayApp:
             self._value_labels["exp"].configure(text="--")
 
         start_exp = self._session.start_exp
+        # Before a session has started (stopped), there is no committed start
+        # value -- show the latest read instead, so a 辨識 pass has something
+        # meaningful on the 起始經驗值 row (per user request 2026-08-27).
+        if start_exp is None:
+            start_exp = snap.exp_cur
         self._value_labels["startexp"].configure(text=f"{start_exp:,}" if start_exp is not None else "--")
 
         self._update_timer_label()
@@ -2706,6 +2735,10 @@ class OverlayApp:
         # shows as a negative delta in red). Matches the EXP block's
         # start/diff split per user request 2026-08-24.
         meso_start = self._session.start_meso
+        # Same as 起始經驗值: while stopped, show the latest meso reading
+        # (from a 辨識 pass or the last inventory scan) instead of '--'.
+        if meso_start is None:
+            meso_start = self._last_meso
         meso_end = self._session.end_meso
         meso = self._session.meso_gained
         self._value_labels["mesostart"].configure(

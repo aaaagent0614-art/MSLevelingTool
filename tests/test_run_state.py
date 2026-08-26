@@ -129,6 +129,7 @@ class _StubApp:
         self._map_value_label = _StubWidget()
         self._compact_win = None
         self._manual_overrides: dict = {}
+        self._last_meso: int | None = None
 
         self.rebuild_calls = 0
 
