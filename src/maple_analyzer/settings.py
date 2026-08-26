@@ -117,3 +117,7 @@ class Settings:
     # (click the value to edit). Auto-OCR fill was removed (2026-08-25) at the
     # user's request -- the game's stylized banner font misread too often.
     map_name: str = ""
+    # Compact 2x2 overlay's last position (screen px), so the user's dragged
+    # placement survives a restart. None until the window has been moved once.
+    compact_x: int | None = None
+    compact_y: int | None = None

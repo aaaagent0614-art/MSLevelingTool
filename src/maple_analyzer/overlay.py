@@ -53,7 +53,7 @@ from PIL import Image
 from . import __version__
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
-from .parser import StatSnapshot, find_meso_candidate, find_meso_in_region, find_stat_fields, parse_fields, parse_meso
+from .parser import StatSnapshot, find_meso_candidate, find_meso_from_boxes, find_meso_in_region, find_stat_fields, parse_fields, parse_meso
 from .rate import Session, SessionSummary
 from .region_selector import RegionSelector
 from .settings import Settings, app_data_dir, load_settings, save_settings
@@ -121,6 +121,10 @@ if sys.platform == "win32":
         pass
 
 TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
+# Stopped/idle tick cadence. While stopped nothing is being recorded -- the
+# HUD only keeps the live OCR readouts fresh -- so a 1Hz cycle is plenty and
+# halves the idle CPU/GPU load (see _do_tick's return).
+TARGET_MS_IDLE = 1000
 # Background locator cadence. Each pass runs full-frame *detection* OCR
 # (~600ms+) in a daemon thread to re-find the stat panel fields and the
 # meso counter, so the tick thread only ever does cheap recognition reads
@@ -212,6 +216,8 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
     else:
         dur_s = f"{dur_min:.1f}m"
     meso_s = f"{s.meso_gained:+,}" if s.meso_gained is not None else "?"
+    if s.sale_meso:
+        meso_s += f" (sale +{s.sale_meso:,})"
     return (
         f"#{index} ({dur_s}): "
         f"EXP {start_s} -> {end_s} ({diff_s}{pct_s})  "
@@ -262,6 +268,14 @@ class OverlayApp:
         # the app (or the .exe) shouldn't silently start a session before the
         # user has actually arrived at the game and decided to track.
         self._run_state = "stopped"
+        # Deferred finalize for equipment-sale revenue. A session that stops
+        # is NOT committed to History immediately -- it stays "pending" so the
+        # user can sell their accumulated drops and record the proceeds
+        # against this session (see _on_record_sale_clicked). _sale_recorded
+        # flips True once the user records a sale; the pending session is
+        # committed when the next one starts (or on app close).
+        self._session_pending = False
+        self._sale_recorded = False
         # Last capture failure message, so _do_tick can log state changes
         # instead of repeating the same line every 2s retry.
         self._last_capture_error: str | None = None
@@ -300,6 +314,7 @@ class OverlayApp:
         # _run_manual_detection): the result text is shown until this timestamp.
         self._detect_result_until = 0.0
         self._detect_result_text = ""
+        self._detect_result_ok = False
         # Compact 2x2 gameplay overlay (see _ensure_compact_win) -- shown while
         # a session is running so the full window can stay minimized.
         self._compact_win = None
@@ -323,6 +338,9 @@ class OverlayApp:
         self.root.geometry("480x624+40+40")
         # Fixed, non-resizable window.
         self.root.resizable(False, False)
+        # Commit any pending session + persist the compact window position on
+        # close, so a stopped-but-uncommitted session isn't silently lost.
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # segmented_button_font is deliberately set to the same chrome font
         # as the rest of the UI: without it, CTkTabview falls back to
@@ -583,9 +601,12 @@ class OverlayApp:
         add_kv_row(loss_card, 1, "mploss", "kv_mp_loss")
         # Meso rows always exist; they show '--' until track_meso is on AND
         # the corresponding inventory readings have landed (see
-        # Session.record_meso).
+        # Session.record_meso). 賣裝收益/總收益 only make sense with meso
+        # tracking too, so they're gated the same way.
         add_kv_row(loss_card, 2, "mesostart", "kv_meso_start")
         add_kv_row(loss_card, 3, "mesocurrent", "kv_meso_current")
+        add_kv_row(loss_card, 4, "mesosale", "kv_meso_sale")
+        add_kv_row(loss_card, 5, "mesototal", "kv_meso_total")
         # Faint hint under the meso rows: the counter only exists while the
         # inventory is open.
         self._meso_hint_label = ctk.CTkLabel(
@@ -593,7 +614,27 @@ class OverlayApp:
             text_color=INK_FAINT, font=self._font(9, bold=False),
         )
         self._i18n(self._meso_hint_label, "meso_hint", size=9, bold=False)
-        self._meso_hint_label.grid(row=4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        self._meso_hint_label.grid(row=6, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 4))
+
+        # 記錄賣裝 button + hint: shown only while a session is stopped-but-
+        # pending (see _apply_run_state). Records the meso from selling the
+        # session's equipment drops against this session.
+        self._record_sale_button = ctk.CTkButton(
+            loss_card, command=self._on_record_sale_clicked,
+            fg_color=ACCENT, text_color=ACCENT_INK, hover_color="#7ff2e0",
+            corner_radius=9, height=28,
+        )
+        self._i18n(self._record_sale_button, "record_sale_button", size=12, bold=True)
+        self._record_sale_button.grid(row=7, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 0))
+        self._record_sale_button.grid_remove()
+
+        self._record_sale_hint = ctk.CTkLabel(
+            loss_card, text="", anchor="w", justify="left",
+            text_color=INK_FAINT, font=self._font(9, bold=False),
+        )
+        self._i18n(self._record_sale_hint, "record_sale_hint", size=9, bold=False)
+        self._record_sale_hint.grid(row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        self._record_sale_hint.grid_remove()
 
         # Three buttons share one row: the left cycles Pause/Resume/Start
         # (see _on_pause_button_clicked), the middle is Stop -- only shown
@@ -638,6 +679,16 @@ class OverlayApp:
         )
         self._update_hint_label.grid(row=5, column=0, sticky="ew", padx=2, pady=(4, 2))
         self._update_hint_label.grid_remove()
+
+        # Compatibility-capture warning (shown when WGC isn't doing the work --
+        # see _render). Sits under the update hint, out of the way.
+        self._compat_hint_label = ctk.CTkLabel(
+            parent, text="", corner_radius=8, fg_color=SURFACE_2,
+            text_color=EXP_COLOR, font=self._font(9, bold=True),
+            anchor="w", justify="left", wraplength=320,
+        )
+        self._compat_hint_label.grid(row=6, column=0, sticky="ew", padx=2, pady=(0, 2))
+        self._compat_hint_label.grid_remove()
 
     def _build_history_tab(self, parent) -> None:
         # Summary strip: total sessions / today's EXP / current-map avg rate
@@ -1031,6 +1082,7 @@ class OverlayApp:
             "startexp": True, "expdiff": True, "eta": s.show_eta,
             "projexp": s.show_proj_exp, "hploss": s.show_hp, "mploss": s.show_mp,
             "mesostart": s.track_meso, "mesocurrent": s.track_meso,
+            "mesosale": s.track_meso, "mesototal": s.track_meso,
         }
         for key, (lbl, value) in self._kv_rows.items():
             for w in (lbl, value):
@@ -1184,8 +1236,11 @@ class OverlayApp:
 
         self._render(merged)
         self._maybe_refresh_manual_meso()
+        # While stopped nothing is recorded -- throttle to 1Hz to halve idle
+        # CPU/GPU load (see TARGET_MS_IDLE). Running/paused keep the 2Hz rate.
+        target = TARGET_MS_IDLE if self._run_state == "stopped" else TARGET_MS
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        return max(0, int(TARGET_MS - elapsed_ms))
+        return max(0, int(target - elapsed_ms))
 
     def _try_locate(self) -> None:
         """Locate the stat panel + meso counter.
@@ -1360,7 +1415,14 @@ class OverlayApp:
         n = len(stat_frac)
         missing = [f for f in ("LV", "HP", "MP", "EXP") if f not in stat_frac]
         if not stat_frac:
-            self._detect_result_text = self._t("detect_result_fail")
+            # Auto mode has nothing to "re-mark" -- the user can only make
+            # sure the game window is visible; manual mode's instruction is
+            # genuinely "re-mark the box".
+            self._detect_result_text = (
+                self._t("detect_result_fail")
+                if self._settings.use_manual
+                else self._t("detect_result_fail_auto")
+            )
         elif missing:
             # Partial: name the missing field(s) -- "3/4" alone doesn't tell
             # the user which one failed (reported 2026-08-25).
@@ -1371,8 +1433,13 @@ class OverlayApp:
             self._detect_result_text = self._t("detect_result_ok", n=n)
         elif meso_frac is not None:
             self._detect_result_text = self._t("detect_result_ok_meso", n=n)
+        elif self._settings.use_manual and self._settings.manual_meso_region is None:
+            # Manual mode, meso position never marked -- the real cause isn't a
+            # closed inventory, it's an unset position.
+            self._detect_result_text = self._t("detect_result_meso_need_mark", n=n)
         else:
             self._detect_result_text = self._t("detect_result_meso_missing", n=n)
+        self._detect_result_ok = bool(stat_frac)
         self._detect_result_until = time.time() + 3.0
 
     def _apply_locate(
@@ -1489,22 +1556,47 @@ class OverlayApp:
             self._update_history_summary()
 
     def _finalize_and_maybe_stop(self) -> None:
-        """The timer rolling over. Always commits to History first; then
-        either stops (default -- see settings.auto_stop) or immediately
-        starts the next session, the only behaviour before that setting
-        existed."""
-        self._commit_session_to_history()
+        """The timer rolling over. With auto_stop (default) the session stops
+        into a *pending* state -- frozen but not yet committed -- so the user
+        can sell equipment and record the proceeds (see _on_record_sale_clicked)
+        before the next session commits it. With auto_stop off it commits and
+        immediately starts the next session (the pre-sale-recording behaviour:
+        no stop, no chance to sell in between)."""
         if self._settings.auto_stop:
-            # Reuses Session.pause() rather than adding a third Session
-            # state: it freezes elapsed() at exactly this instant and makes
-            # record() a no-op, which is exactly what "stopped" needs, and
-            # nothing else in rate.py has to know "stopped" exists.
-            self._session.pause()
-            self._run_state = "stopped"
-            self._apply_run_state()
-            self._notify_session_end()
+            self._stop_into_pending()
         else:
+            self._commit_session_to_history()
             self._session.start()
+
+    def _stop_into_pending(self) -> None:
+        """Freeze the session WITHOUT committing it to History, leaving it
+        pending so the user can sell equipment and record the proceeds against
+        it. Shared by the manual Stop button and the auto-stop timer rollover.
+        The session is committed when the next one starts (or on app close)."""
+        self._session.pause()
+        self._run_state = "stopped"
+        self._session_pending = True
+        self._sale_recorded = False
+        self._apply_run_state()
+        self._notify_session_end()
+
+    def _commit_pending_session(self) -> None:
+        """Finalize + commit the stopped-but-pending session to History (if
+        any), clearing the pending flag. No-op when nothing is pending."""
+        if not self._session_pending:
+            return
+        self._session_pending = False
+        self._sale_recorded = False
+        self._commit_session_to_history()
+
+    def _confirm_start_without_sale(self) -> bool:
+        """Ask before discarding the chance to record equipment revenue."""
+        with self._modal():
+            return messagebox.askyesno(
+                self._t("sale_pending_title"),
+                self._t("sale_pending_prompt"),
+                parent=self.root,
+            )
 
     def _on_restart_clicked(self) -> None:
         if self._settings.save_on_restart:
@@ -1515,17 +1607,11 @@ class OverlayApp:
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
     def _on_stop_clicked(self) -> None:
-        # End the session WITHOUT starting a new one: commit to history, freeze
-        # the session clock, and land in "stopped" (Start becomes the next
-        # action). Mirrors the auto-stop branch of _finalize_and_maybe_stop;
-        # unlike Restart it always commits (not gated on save_on_restart), the
-        # same as the timer-driven auto-stop.
-        self._commit_session_to_history()
-        self._session.pause()
-        self._run_state = "stopped"
-        self._apply_run_state()
+        # End the session WITHOUT starting a new one, and WITHOUT committing
+        # yet: leave it pending so the user can sell equipment and record the
+        # proceeds against it. Commit happens on the next Start (or app close).
+        self._stop_into_pending()
         self._render(self._last)  # immediate feedback, don't wait for next tick
-        self._notify_session_end()
 
     def _on_pause_button_clicked(self) -> None:
         """One button, three roles depending on _run_state -- see
@@ -1536,7 +1622,7 @@ class OverlayApp:
         elif self._run_state == "paused":
             self._session.resume()
             self._run_state = "running"
-        else:  # "stopped" -- already committed to History by _finalize_and_maybe_stop
+        else:  # "stopped"
             # Manual mode requires the stat region before starting -- block with
             # a prompt instead of silently starting on unmarked positions.
             if self._settings.use_manual and self._settings.manual_stat_region is None:
@@ -1545,10 +1631,68 @@ class OverlayApp:
                     parent=self.root,
                 )
                 return
+            # A previous session is still pending (stopped, uncommitted). If its
+            # equipment revenue hasn't been recorded yet, ask before discarding
+            # the chance to record it.
+            if (self._session_pending and not self._sale_recorded
+                    and self._settings.track_meso):
+                if not self._confirm_start_without_sale():
+                    return
+            self._commit_pending_session()
             self._session.start()
             self._run_state = "running"
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
+
+    def _read_meso_now(self) -> int | None:
+        """One-shot meso read for the 記錄賣裝 button. Auto mode prefers the
+        cached meso box (cheap recognition-only read) and falls back to a
+        full-frame detection scan; manual mode OCRs the marked meso region.
+        None when the counter isn't found (inventory closed / not marked)."""
+        try:
+            if self._settings.use_manual:
+                if self._manual_source is None or self._settings.manual_meso_region is None:
+                    return None
+                img = self._manual_source.grab_meso()
+                return parse_meso(self._ocr.read_field(img))
+            if self._meso_box is not None:
+                frame = self._active_source().grab_full()
+                fw, fh = frame.size
+                fx, fy, fw2, fh2 = self._meso_box
+                x = max(0, int(fx * fw) - 2)
+                y = max(0, int(fy * fh) - 2)
+                w = max(1, int(fw2 * fw) + 4)
+                h = max(1, int(fh2 * fh) + 4)
+                crop = frame.crop((x, y, min(fw, x + w), min(fh, y + h)))
+                value = parse_meso(self._ocr.read_field(crop))
+                if value is not None:
+                    return value
+            frame = self._active_source().grab_full()
+            boxes = self._ocr.detect_text(frame)
+            return find_meso_from_boxes(boxes, frame.size)
+        except Exception:
+            return None
+
+    def _on_record_sale_clicked(self) -> None:
+        """Record the meso from selling the pending session's equipment drops.
+        Reads the counter now (inventory must be open) and books the increase
+        against the pending session, showing a timed status with the result."""
+        if not self._session_pending:
+            return
+        value = self._read_meso_now()
+        if value is None:
+            self._detect_result_text = self._t("record_sale_need_inventory")
+            self._detect_result_ok = False
+            self._detect_result_until = time.time() + 3.0
+            self._render(self._last)
+            return
+        delta = self._session.record_sale(value)
+        self._sale_recorded = True
+        booked = delta if (delta is not None and delta > 0) else 0
+        self._detect_result_text = self._t("record_sale_done", n=f"{booked:,}")
+        self._detect_result_ok = True
+        self._detect_result_until = time.time() + 3.0
+        self._render(self._last)
 
     def _apply_run_state(self) -> None:
         label_key = {"running": "pause_button", "paused": "resume_button", "stopped": "start_button"}[self._run_state]
@@ -1572,45 +1716,67 @@ class OverlayApp:
             self._pause_button.grid(row=0, column=0, columnspan=1, sticky="ew", padx=(0, 3))
             self._stop_button.grid_remove()
             self._restart_button.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(3, 0))
+        # 記錄賣裝 button is only meaningful while a session is stopped-but-
+        # pending AND meso tracking is on (the user can still record their
+        # equipment-sale proceeds against it).
+        if (getattr(self, "_record_sale_button", None) is not None
+                and getattr(self, "_record_sale_hint", None) is not None):
+            show_sale = (
+                self._run_state == "stopped" and self._session_pending
+                and self._settings.track_meso
+            )
+            self._record_sale_button.grid() if show_sale else self._record_sale_button.grid_remove()
+            self._record_sale_hint.grid() if show_sale else self._record_sale_hint.grid_remove()
         self._update_compact_visibility()
 
     # ---- compact 2x2 overlay --------------------------------------------
 
     def _ensure_compact_win(self) -> None:
-        """Create the small always-on-top 2x2 overlay (once)."""
+        """Create the small always-on-top overlay (once). Shows the *derived*
+        metrics the game itself doesn't display -- HP/MP consumption, meso
+        income, EXP change + level-up ETA -- rather than duplicating the live
+        HP/MP bars the game already renders."""
         if self._compact_win is not None:
             return
         win = ctk.CTkToplevel(self.root)
         win.title("MsStatTractor")
         win.attributes("-topmost", True)
         win.configure(fg_color=BG)
-        win.geometry("260x210+60+60")
+        x, y = self._settings.compact_x, self._settings.compact_y
+        if x is not None and y is not None:
+            win.geometry(f"280x270+{x}+{y}")
+        else:
+            win.geometry("280x270+60+60")
         win.resizable(False, False)
         win.protocol("WM_DELETE_WINDOW", self._on_restore_main)
         self._compact_win = win
 
         grid = ctk.CTkFrame(win, fg_color=BG)
         grid.pack(fill="both", expand=True, padx=6, pady=(6, 0))
-        grid.grid_columnconfigure(0, weight=1)
-        grid.grid_columnconfigure(1, weight=1)
-        grid.grid_rowconfigure(0, weight=1)
-        grid.grid_rowconfigure(1, weight=1)
+        for c in (0, 1):
+            grid.grid_columnconfigure(c, weight=1)
+        for r in (0, 1):
+            grid.grid_rowconfigure(r, weight=1)
 
-        for label_text, key, r, c, color in (
-            ("LV", "level", 0, 0, EXP_COLOR),
-            ("HP", "hp", 0, 1, HP_COLOR),
-            ("MP", "mp", 1, 0, MP_COLOR),
-            ("EXP", "exp", 1, 1, EXP_COLOR),
-        ):
+        def add_cell(title_key, key, r, c, color):
             cell = ctk.CTkFrame(grid, fg_color=SURFACE, corner_radius=8)
             cell.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
             cell.grid_columnconfigure(0, weight=1)
-            ctk.CTkLabel(cell, text=label_text, font=_FONT_LABEL, text_color=color, anchor="w").grid(
+            ctk.CTkLabel(cell, text=self._t(title_key), font=self._font(9, bold=True), text_color=color, anchor="w").grid(
                 row=0, column=0, sticky="w", padx=(8, 0), pady=(4, 0)
             )
-            val = ctk.CTkLabel(cell, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
+            val = ctk.CTkLabel(cell, text="--", font=_FONT_MONO_SM, text_color=INK, anchor="e")
             val.grid(row=1, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
             self._compact_labels[key] = val
+            return cell
+
+        add_cell("compact_hp_loss", "hploss", 0, 0, HP_COLOR)
+        add_cell("compact_mp_loss", "mploss", 0, 1, MP_COLOR)
+        add_cell("compact_meso", "meso", 1, 0, EXP_COLOR)
+        exp_cell = add_cell("compact_exp", "exp", 1, 1, EXP_COLOR)
+        # The EXP cell also carries the level-up ETA as a second value line.
+        self._compact_eta = ctk.CTkLabel(exp_cell, text="--", font=_FONT_MONO_SM, text_color=INK_DIM, anchor="e")
+        self._compact_eta.grid(row=2, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
 
         self._compact_timer = ctk.CTkLabel(win, text="--:--", font=self._font(11, bold=True), text_color=INK)
         self._compact_timer.pack(pady=(4, 2))
@@ -1648,8 +1814,28 @@ class OverlayApp:
             self.root.iconify()
         else:
             if self._compact_win is not None:
+                self._save_compact_pos()
                 self._compact_win.withdraw()
             self.root.deiconify()
+
+    def _save_compact_pos(self) -> None:
+        """Persist the compact overlay's current position so a restart restores
+        the user's dragged placement."""
+        if self._compact_win is None or not self._compact_win.winfo_exists():
+            return
+        try:
+            self._settings.compact_x = self._compact_win.winfo_x()
+            self._settings.compact_y = self._compact_win.winfo_y()
+            self._persist_settings()
+        except Exception:
+            pass
+
+    def _on_close(self) -> None:
+        """App close: commit any pending (uncommitted) session and persist the
+        compact position before tearing down."""
+        self._commit_pending_session()
+        self._save_compact_pos()
+        self.root.destroy()
 
     def _on_restore_main(self) -> None:
         """Toggle the full window between minimized and normal (the compact
@@ -1662,20 +1848,33 @@ class OverlayApp:
     def _render_compact(self, snap) -> None:
         if self._compact_win is None or not self._compact_win.winfo_exists():
             return
-        self._compact_labels["level"].configure(text=str(snap.level) if snap.level is not None else "--")
-        self._compact_labels["hp"].configure(
-            text=f"{snap.hp_cur}/{snap.hp_max}" if snap.hp_cur is not None else "--"
+        hp_loss, mp_loss = self._session.hp_loss, self._session.mp_loss
+        self._compact_labels["hploss"].configure(
+            text=_fmt_loss(hp_loss), text_color=HP_COLOR if hp_loss > 0 else INK_FAINT,
         )
-        self._compact_labels["mp"].configure(
-            text=f"{snap.mp_cur}/{snap.mp_max}" if snap.mp_cur is not None else "--"
+        self._compact_labels["mploss"].configure(
+            text=_fmt_loss(mp_loss), text_color=MP_COLOR if mp_loss > 0 else INK_FAINT,
         )
-        start_exp = self._session.start_exp
+        total = self._session.total_meso
+        if total is not None:
+            sign = "+" if total >= 0 else "-"
+            self._compact_labels["meso"].configure(
+                text=f"{sign}{abs(total):,}", text_color=EXP_COLOR if total >= 0 else HP_COLOR,
+            )
+        else:
+            self._compact_labels["meso"].configure(text="--", text_color=INK_FAINT)
         exp_diff = self._session.exp_diff
-        if snap.exp_cur is not None:
-            display = (start_exp + exp_diff) if (start_exp is not None and exp_diff is not None) else snap.exp_cur
-            self._compact_labels["exp"].configure(text=f"{display:,}")
+        total_exp = snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
+        if exp_diff is not None:
+            pct_s = f" (+{exp_diff / total_exp * 100:.2f}%)" if total_exp else ""
+            self._compact_labels["exp"].configure(text=f"+{exp_diff:,}{pct_s}")
         else:
             self._compact_labels["exp"].configure(text="--")
+        eta_s = self._levelup_eta_s(snap)
+        if getattr(self, "_compact_eta", None) is not None:
+            self._compact_eta.configure(
+                text=(self._t("compact_eta") + " " + _fmt_duration(eta_s)) if eta_s is not None else "--"
+            )
         if self._run_state == "stopped":
             timer_text = "--:--"
         else:
@@ -1829,9 +2028,16 @@ class OverlayApp:
         mini_stat(0, 0, self._t("history_exp"), exp_s, exp_c)
 
         meso_s, meso_c = "--", INK_FAINT
+        # Show the session's true meso total: live drops + equipment-sale
+        # revenue (recorded after the session stopped).
+        total_meso = None
         if summary.meso_gained is not None:
-            meso_s = f"{summary.meso_gained:+,}"
-            meso_c = EXP_COLOR if summary.meso_gained >= 0 else HP_COLOR
+            total_meso = summary.meso_gained + (summary.sale_meso or 0)
+        elif summary.sale_meso:
+            total_meso = summary.sale_meso
+        if total_meso is not None:
+            meso_s = f"{total_meso:+,}"
+            meso_c = EXP_COLOR if total_meso >= 0 else HP_COLOR
         mini_stat(0, 1, self._t("history_meso"), meso_s, meso_c)
 
         mini_stat(1, 0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
@@ -2040,6 +2246,21 @@ class OverlayApp:
 
     # ---- render --------------------------------------------------------
 
+    def _levelup_eta_s(self, snap: StatSnapshot) -> float | None:
+        """Seconds until level-up at the current session EXP rate. None until
+        a few seconds of positive gain make the rate stable (extrapolating off
+        a 1-2s sample swings wildly)."""
+        total_exp = snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
+        exp_diff = self._session.exp_diff
+        elapsed = self._session.elapsed()
+        if not (exp_diff and exp_diff > 0 and elapsed > 3 and total_exp and snap.exp_cur):
+            return None
+        rate_per_sec = exp_diff / elapsed
+        remaining_exp = total_exp - snap.exp_cur
+        if rate_per_sec <= 0:
+            return None
+        return remaining_exp / rate_per_sec
+
     def _render(self, snap: StatSnapshot) -> None:
         # Map field: when unset show an obvious "click to enter" placeholder in
         # the accent colour (distinct from the plain '--' every other field
@@ -2109,13 +2330,7 @@ class OverlayApp:
         # ETA to level up: current session's EXP/sec rate, projected against
         # the EXP still needed (total - cur). Needs a few seconds of session
         # data first -- extrapolating off a 1-2 second sample swings wildly.
-        elapsed = self._session.elapsed()
-        eta_s = None
-        if exp_diff and exp_diff > 0 and elapsed > 3 and total_exp and snap.exp_cur:
-            rate_per_sec = exp_diff / elapsed
-            remaining_exp = total_exp - snap.exp_cur
-            if rate_per_sec > 0:
-                eta_s = remaining_exp / rate_per_sec
+        eta_s = self._levelup_eta_s(snap)
         self._value_labels["eta"].configure(text=_fmt_duration(eta_s) if eta_s is not None else "--")
 
         # Projected session total: current rate extrapolated across the full
@@ -2156,6 +2371,22 @@ class OverlayApp:
         else:
             self._value_labels["mesocurrent"].configure(text="--", text_color=INK)
 
+        # Equipment-sale revenue + total meso (see Session.record_sale) --
+        # populated after the session stops and the user records a sale.
+        sale = self._session.sale_revenue
+        self._value_labels["mesosale"].configure(
+            text=f"+{sale:,}", text_color=EXP_COLOR if sale > 0 else INK_FAINT,
+        )
+        total = self._session.total_meso
+        if total is not None:
+            sign = "+" if total >= 0 else "-"
+            self._value_labels["mesototal"].configure(
+                text=f"{sign}{abs(total):,}",
+                text_color=EXP_COLOR if total >= 0 else HP_COLOR,
+            )
+        else:
+            self._value_labels["mesototal"].configure(text="--", text_color=INK)
+
         # Pause/stop/calibration are user- or engine-driven states that take
         # priority over the activity-based idle/tracking read below -- e.g. a
         # paused session with real HP/MP/EXP movement in its history isn't
@@ -2164,7 +2395,7 @@ class OverlayApp:
         if time.time() < getattr(self, "_detect_result_until", 0.0):
             self._status_pill.configure(
                 text=self._detect_result_text, fg_color=SURFACE_2,
-                text_color=OK_COLOR if self._stat_boxes else HP_COLOR,
+                text_color=OK_COLOR if self._detect_result_ok else HP_COLOR,
             )
         elif self._run_state == "paused":
             self._status_pill.configure(text=self._t("status_paused"), fg_color=SURFACE_2, text_color=EXP_COLOR)
@@ -2180,6 +2411,17 @@ class OverlayApp:
                 self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
             else:
                 self._status_pill.configure(text=self._t("status_tracking"), fg_color=TRACK_BG, text_color=OK_COLOR)
+        # Compatibility-capture warning: WGC is the occlusion-proof path; if
+        # the last grab degraded to PrintWindow/mss, say so (manual mode has no
+        # capture_mode, defaulting to "wgc" = no warning -- the user chose
+        # screen-region capture there deliberately).
+        if getattr(self, "_compat_hint_label", None) is not None:
+            mode = getattr(self._active_source(), "capture_mode", "wgc")
+            if mode != "wgc":
+                self._compat_hint_label.configure(text=self._t("compat_mode_hint"))
+                self._compat_hint_label.grid()
+            else:
+                self._compat_hint_label.grid_remove()
         self._render_compact(snap)
 
     def run(self) -> None:

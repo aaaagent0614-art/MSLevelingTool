@@ -12,6 +12,7 @@ geometry or fonts beyond what _t()/_font() compute from Settings.language.
 """
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 
 import pytest
@@ -52,6 +53,9 @@ class _StubWidget:
 
 class _StubRoot:
     def attributes(self, *_a, **_kw):
+        pass
+
+    def destroy(self):
         pass
 
 
@@ -102,6 +106,8 @@ class _StubApp:
         self._ocr = _StubOcr()
         self._modal_open = False
         self._run_state = "stopped"
+        self._session_pending = False
+        self._sale_recorded = False
         self._last_capture_error: str | None = None
         self._last_client_size = None
         self.root = _StubRoot()
@@ -118,6 +124,7 @@ class _StubApp:
         self._value_labels: dict = defaultdict(_StubWidget)
         self._bars: dict = defaultdict(_StubWidget)
         self._map_value_label = _StubWidget()
+        self._compact_win = None
 
         self.rebuild_calls = 0
 
@@ -167,6 +174,14 @@ class _StubApp:
     _maybe_refresh_manual_meso = OverlayApp._maybe_refresh_manual_meso
     _commit_session_to_history = OverlayApp._commit_session_to_history
     _finalize_and_maybe_stop = OverlayApp._finalize_and_maybe_stop
+    _stop_into_pending = OverlayApp._stop_into_pending
+    _commit_pending_session = OverlayApp._commit_pending_session
+    _confirm_start_without_sale = OverlayApp._confirm_start_without_sale
+    _on_record_sale_clicked = OverlayApp._on_record_sale_clicked
+    _read_meso_now = OverlayApp._read_meso_now
+    _levelup_eta_s = OverlayApp._levelup_eta_s
+    _on_close = OverlayApp._on_close
+    _save_compact_pos = OverlayApp._save_compact_pos
     _on_restart_clicked = OverlayApp._on_restart_clicked
     _on_stop_clicked = OverlayApp._on_stop_clicked
     _on_pause_button_clicked = OverlayApp._on_pause_button_clicked
@@ -229,7 +244,7 @@ def test_pause_button_cycles_running_paused_running():
     assert app._pause_button.cget("text") == app._t("pause_button")
 
 
-def test_stop_ends_session_without_starting_a_new_one():
+def test_stop_ends_session_without_starting_a_new_one(monkeypatch):
     app = _StubApp()
     app._on_pause_button_clicked()  # stopped -> running
     _calibrate(app, gains=(100,))
@@ -238,10 +253,19 @@ def test_stop_ends_session_without_starting_a_new_one():
     assert app._run_state == "paused"
     app._on_stop_clicked()
     assert app._run_state == "stopped"
-    assert len(app._session_history) == 1  # committed, unlike a throwaway pause
+    # Stop now defers the commit: the session is *pending* (so equipment
+    # revenue can still be recorded), not yet in History.
+    assert app._session_pending is True
+    assert len(app._session_history) == 0
     assert app._pause_button.cget("text") == app._t("start_button")
     # The session clock is frozen (paused), not rolled into a fresh session.
     assert app._session.is_calibrating is False
+    # Starting the next session commits the pending one (after the prompt).
+    monkeypatch.setattr(overlay_module.messagebox, "askyesno", lambda *a, **kw: True)
+    app._on_pause_button_clicked()  # Start
+    assert app._run_state == "running"
+    assert len(app._session_history) == 1
+    assert app._session_pending is False
 
 
 # --- auto-stop (default on) -----------------------------------------------
@@ -255,7 +279,9 @@ def test_auto_stop_commits_and_stops_by_default():
     app._session._start_time -= 61  # force the interval to have elapsed
     app._do_tick()
     assert app._run_state == "stopped"
-    assert len(app._session_history) == 1
+    # auto-stop now leaves the session pending (deferred finalize).
+    assert app._session_pending is True
+    assert len(app._session_history) == 0
     assert app._restart_button.grid_info() == {}  # hidden while stopped
     elapsed_at_stop = app._session.elapsed()
     app._do_tick()
@@ -306,7 +332,11 @@ def test_timer_label_keeps_moving_while_capture_is_blocked():
     app = _StubApp()
     app._on_pause_button_clicked()
     _calibrate(app, gains=(100,))
-    app._session._start_time -= 5
+    # Reset the clock to a fixed "4.5s ago" so the remaining time is
+    # deterministically 9:55 (600 - 4.5 = 595.5s) rather than subject to how
+    # long _calibrate's ticks took -- the old `-= 5` was off-by-one flaky
+    # (9:54 vs 9:55 depending on timing).
+    app._session._start_time = time.time() - 4.5
     app._source.blocked = True
     app._do_tick()
     assert app._timer_label.cget("text") == app._t("timer_left", time="9:55")
@@ -324,7 +354,7 @@ def test_auto_finalize_still_fires_while_capture_is_blocked():
     app._source.blocked = True
     app._do_tick()
     assert app._run_state == "stopped"
-    assert len(app._session_history) == 1
+    assert app._session_pending is True  # stopped into pending, not committed
 
 
 def test_stopped_session_does_not_auto_finalize_again():
@@ -402,3 +432,71 @@ def test_delete_history_prompt_names_the_session(monkeypatch):
     monkeypatch.setattr(overlay_module.messagebox, "askyesno", _fake_askyesno)
     app._on_delete_history_clicked(1)
     assert "grinding spot A" in seen["prompt"]
+
+
+# --- equipment-sale revenue (deferred finalize) ---------------------------
+
+def test_start_commits_pending_session_without_prompt_when_sale_recorded():
+    app = _StubApp()
+    app._on_pause_button_clicked()
+    _calibrate(app, gains=(100,))
+    app._session._start_time -= 2
+    app._on_stop_clicked()  # pending
+    app._sale_recorded = True  # user already recorded the sale
+    app._on_pause_button_clicked()  # Start: no prompt needed
+    assert app._run_state == "running"
+    assert len(app._session_history) == 1
+    assert app._session_pending is False
+
+
+def test_start_without_sale_prompts_and_can_stay_stopped(monkeypatch):
+    app = _StubApp()
+    app._on_pause_button_clicked()
+    _calibrate(app, gains=(100,))
+    app._session._start_time -= 2
+    app._on_stop_clicked()  # pending
+    monkeypatch.setattr(overlay_module.messagebox, "askyesno", lambda *a, **kw: False)
+    app._on_pause_button_clicked()  # Start -> prompt -> "No"
+    assert app._run_state == "stopped"
+    assert app._session_pending is True
+    assert app._session_history == []
+
+
+def test_record_sale_records_and_marks_sale_recorded(monkeypatch):
+    app = _StubApp()
+    app._on_pause_button_clicked()
+    _calibrate(app, gains=(100,))
+    app._session.record_meso(1_000_000)  # baseline
+    app._session.record_meso(1_250_000)  # end -> +250k drops
+    app._session._start_time -= 2
+    app._on_stop_clicked()  # pending
+    monkeypatch.setattr(app, "_read_meso_now", lambda: 1_500_000)
+    app._on_record_sale_clicked()
+    assert app._sale_recorded is True
+    assert app._session.sale_revenue == 250_000
+    assert app._session.total_meso == 500_000  # 250k drops + 250k sale
+
+
+def test_record_sale_without_inventory_does_not_mark_recorded(monkeypatch):
+    app = _StubApp()
+    app._on_pause_button_clicked()
+    _calibrate(app, gains=(100,))
+    app._session.record_meso(1_000_000)
+    app._session.record_meso(1_250_000)
+    app._session._start_time -= 2
+    app._on_stop_clicked()  # pending
+    monkeypatch.setattr(app, "_read_meso_now", lambda: None)
+    app._on_record_sale_clicked()
+    assert app._sale_recorded is False
+    assert app._session.sale_revenue == 0
+
+
+def test_close_commits_pending_session():
+    app = _StubApp()
+    app._on_pause_button_clicked()
+    _calibrate(app, gains=(100,))
+    app._session._start_time -= 2
+    app._on_stop_clicked()  # pending
+    app._on_close()
+    assert app._session_pending is False
+    assert len(app._session_history) == 1

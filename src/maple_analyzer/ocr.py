@@ -19,10 +19,26 @@ import numpy as np
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 
+# How many CPU threads the OCR engine may use. onnxruntime defaults to every
+# physical core, and the per-tick recognition + periodic full-frame detection
+# would otherwise spin up N threads that compete with the game for CPU --
+# the reported "game lags after opening" residual. Recognition on the small
+# pre-cropped fields is ~15ms and detection ~600ms even on 2 threads, so this
+# costs the HUD nothing measurable while removing the all-cores contention.
+_OCR_INTRA_OP_THREADS = 2
+_OCR_INTER_OP_THREADS = 1
+
 
 class StatPanelOcr:
     def __init__(self) -> None:
-        self._engine = RapidOCR()
+        # intra_op_num_threads/inter_op_num_threads are forwarded by RapidOCR
+        # through its config into onnxruntime's SessionOptions (see
+        # rapidocr_onnxruntime's infer_engine._init_sess_opts) -- the only
+        # supported way to bound OCR CPU usage without patching the library.
+        self._engine = RapidOCR(
+            intra_op_num_threads=_OCR_INTRA_OP_THREADS,
+            inter_op_num_threads=_OCR_INTER_OP_THREADS,
+        )
 
     def read_field(self, image: Image.Image) -> str:
         """Recognition-only OCR on a small pre-cropped single-line field crop."""

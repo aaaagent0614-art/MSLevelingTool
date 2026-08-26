@@ -168,6 +168,54 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "rename_dialog_prompt": {"en": "Session name:", "zh": "紀錄名稱："},
     "map_dialog_title": {"en": "Map name", "zh": "地圖名稱"},
     "map_dialog_prompt": {"en": "Map name:", "zh": "地圖名稱："},
+
+    # Equipment-sale revenue (recorded after a session stops, attributed to
+    # the session whose drops are being sold).
+    "kv_meso_sale": {"en": "Sale revenue", "zh": "賣裝收益"},
+    "kv_meso_total": {"en": "Total meso", "zh": "總收益"},
+    "record_sale_button": {"en": "Record Sale", "zh": "記錄賣裝"},
+    "record_sale_hint": {
+        "en": "After selling, open the inventory (I) and press this.",
+        "zh": "賣完裝後開啟道具欄（I），再按此記錄。",
+    },
+    "record_sale_done": {"en": "Sale recorded +{n}", "zh": "已記錄賣裝 +{n}"},
+    "record_sale_need_inventory": {
+        "en": "Open the inventory (I) first, then record.",
+        "zh": "請先開啟道具欄（I）再記錄賣裝。",
+    },
+    "sale_pending_title": {"en": "Equipment revenue not recorded", "zh": "尚未計算裝備收益"},
+    "sale_pending_prompt": {
+        "en": "Equipment revenue hasn't been recorded for the last session. Start a new record anyway?",
+        "zh": "尚未計算裝備收益，是否開始新的紀錄？",
+    },
+
+    # Compact overlay metric labels (derived values the game itself doesn't
+    # show -- the game already renders live HP/MP bars, so the small window
+    # shows the *changes* instead of duplicating current values).
+    "compact_hp_loss": {"en": "HP USED", "zh": "HP 消耗"},
+    "compact_mp_loss": {"en": "MP USED", "zh": "MP 消耗"},
+    "compact_meso": {"en": "MESO", "zh": "楓幣"},
+    "compact_exp": {"en": "EXP", "zh": "經驗值"},
+    "compact_eta": {"en": "LEVEL", "zh": "升級"},
+
+    # Shown when WGC isn't available and capture has silently degraded to
+    # PrintWindow / mss (screen region) -- the user should know their
+    # anti-occlusion capture is gone.
+    "compat_mode_hint": {
+        "en": "Compatibility capture (no anti-occlusion)",
+        "zh": "相容模式（無抗遮擋）",
+    },
+
+    # Detection-result messages, split by cause so the instruction actually
+    # matches what the user can do (see _set_detect_result).
+    "detect_result_fail_auto": {
+        "en": "Detection failed — check the game window",
+        "zh": "偵測失敗，請確認遊戲視窗",
+    },
+    "detect_result_meso_need_mark": {
+        "en": "Detected {n}/4 fields — mark the meso position first",
+        "zh": "偵測到 {n}/4 欄位，請先標記楓幣位置",
+    },
 }
 
 

@@ -119,6 +119,12 @@ class GameWindowCapture:
         self._stream_frame: Image.Image | None = None
         self._stream_thread: threading.Thread | None = None
         self._stream_stop = threading.Event()
+        # Which capture path the last grab actually took: "wgc" (occlusion
+        # proof, DirectX-capable), "printwindow", or "mss" (screen-region
+        # fallback -- NOT occlusion proof). The overlay reads this to show a
+        # "compatibility mode" hint when WGC isn't doing the work, since a
+        # silent fallback leaves the user unaware their anti-occlusion is gone.
+        self.capture_mode = "wgc"
 
     def _owning_process_name(self, hwnd: int) -> str:
         # Title alone isn't a reliable match: e.g. a browser tab for a wiki page
@@ -520,14 +526,24 @@ class GameWindowCapture:
             img = self._read_stream_frame()
             if img is None:
                 img = self._print_window(hwnd, cw, ch)
-            if img is None:
-                img = self._screen_fallback()
+                if img is None:
+                    img = self._screen_fallback()
+                    self.capture_mode = "mss"
+                else:
+                    self.capture_mode = "printwindow"
+            else:
+                self.capture_mode = "wgc"
         else:
             img = self._try_wgc_frame(hwnd)
             if img is None:
                 img = self._print_window(hwnd, cw, ch)
-            if img is None:
-                img = self._screen_fallback()
+                if img is None:
+                    img = self._screen_fallback()
+                    self.capture_mode = "mss"
+                else:
+                    self.capture_mode = "printwindow"
+            else:
+                self.capture_mode = "wgc"
         self.client_size = img.size
         return img
 

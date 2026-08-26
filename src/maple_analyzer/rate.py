@@ -60,6 +60,13 @@ class SessionSummary:
     start_meso: int | None = None
     end_meso: int | None = None
     meso_gained: int | None = None
+    # Meso from selling accumulated equipment, recorded *after* the session
+    # stopped (see Session.record_sale). Not part of meso_gained -- that is
+    # the session's live delta, which never sees a sale because selling
+    # happens between sessions. 0 by default, None only for summaries built
+    # before this field existed. The session's true meso total is
+    # meso_gained + sale_meso.
+    sale_meso: int = 0
     # User-assigned label, e.g. "grinding spot A". None until renamed via the
     # History tab -- UI-layer concern only, the engine never sets this.
     name: str | None = None
@@ -372,6 +379,11 @@ class Session:
         # can't be corroborated tick-by-tick the same way.
         self._start_meso: int | None = None
         self._end_meso: int | None = None
+        # Equipment-sale revenue (see record_sale) -- accumulated after the
+        # session stops, baseline diffed against _end_meso (or the previous
+        # sale reading). Reset by start().
+        self._sale_revenue = 0
+        self._last_sale_meso: int | None = None
 
     def start(self, now: float | None = None) -> None:
         """Begin a new session. Carries forward whatever EXP/HP/MP values are
@@ -399,6 +411,8 @@ class Session:
         # record_meso's docstring).
         self._start_meso = None
         self._end_meso = None
+        self._sale_revenue = 0
+        self._last_sale_meso = None
 
     # ---- pause/resume -------------------------------------------------
 
@@ -748,6 +762,45 @@ class Session:
             return None
         return self._end_meso - self._start_meso
 
+    def record_sale(self, meso: int) -> int | None:
+        """Feed one post-sale meso reading into the current session, for the
+        equipment the user sells *after* the session has stopped.
+
+        record_meso is deliberately a no-op while paused (the session clock is
+        frozen, so the user is no longer grinding) -- but selling happens
+        exactly then, and its proceeds belong to the session whose drops are
+        being sold. So this is a separate path, callable in the stopped state:
+        it diffs the reading against the session's end meso (or the previous
+        sale reading) and accumulates every positive delta as sale revenue.
+
+        Returns the delta booked this call, or None when there was no prior
+        meso reading to diff against (the inventory was never read during the
+        session -- the first sale reading then just becomes the baseline for
+        the next one)."""
+        base = self._last_sale_meso if self._last_sale_meso is not None else self._end_meso
+        if base is None:
+            self._last_sale_meso = meso
+            return None
+        delta = meso - base
+        if delta > 0:
+            self._sale_revenue += delta
+        self._last_sale_meso = meso
+        return delta
+
+    @property
+    def sale_revenue(self) -> int:
+        """Total meso attributed to equipment sales recorded for this session
+        (see record_sale). 0 until the user records a sale."""
+        return self._sale_revenue
+
+    @property
+    def total_meso(self) -> int | None:
+        """The session's true meso total: live drops (meso_gained) plus
+        equipment-sale revenue. None until meso_gained itself is known."""
+        if self.meso_gained is None:
+            return None
+        return self.meso_gained + self._sale_revenue
+
     @property
     def hp_loss(self) -> int:
         return self._hp.loss
@@ -787,4 +840,5 @@ class Session:
             start_meso=self._start_meso,
             end_meso=self._end_meso,
             meso_gained=self.meso_gained,
+            sale_meso=self._sale_revenue,
         )

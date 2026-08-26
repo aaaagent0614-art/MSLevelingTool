@@ -273,6 +273,70 @@ def test_finalize_without_meso_keeps_fields_none():
     assert summary.start_meso is None and summary.end_meso is None
 
 
+# ---- equipment-sale revenue ----------------------------------------------
+
+def test_record_sale_baselines_off_end_meso():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_250_000)
+    delta = s.record_sale(1_500_000)
+    assert delta == 250_000
+    assert s.sale_revenue == 250_000
+    assert s.total_meso == 500_000  # 250k drops + 250k sale
+
+
+def test_record_sale_accumulates_multiple_batches():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_200_000)
+    s.record_sale(1_350_000)  # first batch +150k
+    s.record_sale(1_500_000)  # second batch +150k
+    assert s.sale_revenue == 300_000
+
+
+def test_record_sale_ignores_negative_delta():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_250_000)
+    s.record_sale(1_200_000)  # bought potions, meso dropped
+    assert s.sale_revenue == 0
+
+
+def test_record_sale_without_end_meso_baselines_then_diffs():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    # No meso endpoints recorded during the session.
+    assert s.record_sale(1_500_000) is None  # first call only baselines
+    assert s.sale_revenue == 0
+    assert s.record_sale(1_600_000) == 100_000
+
+
+def test_sale_revenue_reset_on_new_session():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_250_000)
+    s.record_sale(1_500_000)
+    assert s.sale_revenue == 250_000
+    s.start()
+    assert s.sale_revenue == 0
+    assert s.meso_gained is None
+
+
+def test_finalize_includes_sale_meso():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.record_meso(1_000_000)
+    s.record_meso(1_250_000)
+    s.record_sale(1_500_000)
+    summary = s.finalize(10)
+    assert summary.meso_gained == 250_000
+    assert summary.sale_meso == 250_000
+
+
 def test_exp_per_min():
     s = Session(require_calibration=False)
     s.start(now=1000.0)
