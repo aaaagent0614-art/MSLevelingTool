@@ -1,3 +1,3 @@
 """MsStatTractor — 楓之谷練功追蹤 HUD (OCR-based stat tracker)."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

@@ -1,0 +1,57 @@
+# Build the Windows standalone .exe on a GitHub Actions Windows runner and
+# attach it to the release. Triggered by pushing a tag like v1.3.0-beta
+# (asset named MsStatTractor-1.3.0-beta.zip), or manually via the Actions tab.
+#
+# This replaces the old manual flow (run BUILD_MsStatTractor.bat on a Windows
+# box, copy the ~100MB zip over, upload it to the release) -- the build now
+# happens in the cloud and Alex just downloads from the Releases page.
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build exe (PyInstaller one-folder)
+        run: python -m PyInstaller scripts/maple_analyzer.spec --noconfirm
+
+      - name: Compute asset name
+        id: asset
+        shell: pwsh
+        run: |
+          # strip the leading "v" so the asset matches the old naming
+          # (MsStatTractor-1.2.0-beta.zip from tag v1.2.0-beta)
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          "zip=MsStatTractor-$tag.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/MsStatTractor -DestinationPath "${{ steps.asset.outputs.zip }}" -Force
+          Get-Item "${{ steps.asset.outputs.zip }}" | Select-Object Name, Length
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.asset.outputs.zip }}
+          prerelease: ${{ contains(github.ref_name, 'beta') }}
+          fail_on_unmatched_files: false
