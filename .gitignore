@@ -16,6 +16,9 @@ build/
 dist/
 *.spec.bak
 
+# Release zips -- distributed via GitHub Releases, never committed to the repo
+*.zip
+
 # Dev/planning notes -- not part of the release repo
 DEVELOPMENT.md
 VERSIONS.md
