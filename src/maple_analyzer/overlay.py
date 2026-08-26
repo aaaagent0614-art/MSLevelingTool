@@ -319,6 +319,7 @@ class OverlayApp:
         # a session is running so the full window can stay minimized.
         self._compact_win = None
         self._compact_labels: dict[str, ctk.CTkLabel] = {}
+        self._compact_eta = None  # set inside _ensure_compact_win's add_cell
         # Manual stat overrides (2026-08-27): values the player typed over an
         # OCR misread on the Dashboard (see _on_stat_edit). Folded into the
         # merged snapshot every tick (see _apply_manual_overrides) until
@@ -345,7 +346,11 @@ class OverlayApp:
         self.root.title("MsStatTractor")
         self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
-        self.root.geometry("480x624+40+40")
+        # Window size (2026-08-28): width is 2/3 of the old 480 (320), and the
+        # height fits the whole Dashboard (tab bar → Start button) without
+        # scrolling. The old 480x624 needed a scrollbar once the comparison
+        # card was added; that card now lives on its own tab.
+        self.root.geometry("320x660+40+40")
         # Fixed, non-resizable window.
         self.root.resizable(False, False)
         # Commit any pending session + persist the compact window position on
@@ -370,6 +375,7 @@ class OverlayApp:
         self._tab_names = {
             "live": t("tab_live", self._settings.language),
             "history": t("tab_history", self._settings.language),
+            "compare": t("tab_compare", self._settings.language),
             "settings": t("tab_settings", self._settings.language),
         }
         for name in self._tab_names.values():
@@ -378,6 +384,7 @@ class OverlayApp:
         self._build_live_tab(self._tabview.tab(self._tab_names["live"]))
         self._build_history_tab(self._tabview.tab(self._tab_names["history"]))
         self._rebuild_history_cards()
+        self._build_compare_tab(self._tabview.tab(self._tab_names["compare"]))
         self._build_settings_tab(self._tabview.tab(self._tab_names["settings"]))
         self._tabview.set(self._tab_names["live"])  # CTkTabview defaults to the last-added tab otherwise
         self._apply_visibility()
@@ -449,7 +456,10 @@ class OverlayApp:
         self._settings.language = lang
         self._persist_settings()
 
-        for logical, key in (("live", "tab_live"), ("history", "tab_history"), ("settings", "tab_settings")):
+        for logical, key in (
+            ("live", "tab_live"), ("history", "tab_history"),
+            ("compare", "tab_compare"), ("settings", "tab_settings"),
+        ):
             old_name = self._tab_names[logical]
             new_name = self._t(key)
             if new_name != old_name:
@@ -480,6 +490,9 @@ class OverlayApp:
         # _append_history_card already picks up the new language/font.
         self._rebuild_history_cards()
         self._refresh_manual_status()
+        # Compare tab's dropdown labels carry translated chrome (紀錄 #n) and
+        # the placeholder -- rebuild them so they match the new language.
+        self._refresh_compare_tab()
 
         self._render(self._last)  # refreshes status pill / timer text immediately
 
@@ -704,48 +717,6 @@ class OverlayApp:
         self._compat_hint_label.grid(row=6, column=0, sticky="ew", padx=2, pady=(0, 2))
         self._compat_hint_label.grid_remove()
 
-        # Comparison card (2026-08-26): shows the live session's per-minute
-        # metrics against the History baseline picked on the History tab (see
-        # _on_compare_clicked). Always present; without a baseline it shows a
-        # one-line hint instead of metric rows.
-        self._compare_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
-        self._compare_card.grid(row=7, column=0, sticky="ew", padx=2, pady=(0, 6))
-        self._compare_card.grid_columnconfigure(0, weight=1)
-        self._compare_card.grid_columnconfigure(1, weight=0)
-
-        comp_head = ctk.CTkFrame(self._compare_card, fg_color="transparent")
-        comp_head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(8, 2))
-        self._i18n(
-            ctk.CTkLabel(comp_head, anchor="w", text_color=INK_DIM), "compare_card_title", size=11, bold=True
-        ).pack(side="left")
-        self._compare_base_badge = ctk.CTkLabel(
-            comp_head, text="", font=self._font(10, bold=True),
-            text_color=ACCENT, fg_color=SURFACE_2, corner_radius=6, padx=6, pady=1,
-        )
-        self._compare_base_badge.pack(side="left", padx=(8, 0))
-
-        self._compare_labels: dict[str, ctk.CTkLabel] = {}
-
-        def add_compare_row(row: int, key: str, i18n_key: str) -> None:
-            lbl = ctk.CTkLabel(self._compare_card, text_color=INK_DIM, anchor="w")
-            self._i18n(lbl, i18n_key, size=11, bold=False)
-            lbl.grid(row=row, column=0, sticky="w", padx=(12, 6), pady=0)
-            val = ctk.CTkLabel(self._compare_card, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
-            val.grid(row=row, column=1, sticky="e", padx=(6, 12), pady=0)
-            self._compare_labels[key] = val
-
-        add_compare_row(1, "exp", "kv_compare_exp")
-        add_compare_row(2, "hp", "kv_compare_hp")
-        add_compare_row(3, "mp", "kv_compare_mp")
-        add_compare_row(4, "meso", "kv_compare_meso")
-
-        self._compare_no_base_label = ctk.CTkLabel(
-            self._compare_card, text="", anchor="w", justify="left",
-            text_color=INK_FAINT, font=self._font(9, bold=False),
-        )
-        self._i18n(self._compare_no_base_label, "compare_no_base", size=9, bold=False)
-        self._compare_no_base_label.grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 6))
-
     def _build_history_tab(self, parent) -> None:
         # Summary strip: total sessions / today's EXP / current-map avg rate
         # (see _update_history_summary), plus a cleanup nudge when large.
@@ -770,6 +741,214 @@ class OverlayApp:
         )
         self._i18n(self._history_empty_label, "history_empty", size=13, bold=False)
         self._history_empty_label.pack(pady=24)
+
+    def _build_compare_tab(self, parent) -> None:
+        """Compare tab (2026-08-28): pick two History records via dropdowns
+        and diff their per-minute metrics side by side. The old baseline
+        comparison on the Dashboard (and the History-card 比較 button) was
+        removed in favour of this dedicated tab."""
+        # Hint shown while there are no sessions to compare.
+        self._compare_empty_label = ctk.CTkLabel(
+            parent, text="", anchor="w", justify="left",
+            text_color=INK_FAINT, font=self._font(11, bold=False),
+        )
+        self._i18n(self._compare_empty_label, "compare_no_sessions", size=11, bold=False)
+        self._compare_empty_label.pack(fill="x", padx=12, pady=(12, 0))
+
+        pick_row = ctk.CTkFrame(parent, fg_color="transparent")
+        pick_row.pack(fill="x", padx=12, pady=(10, 6))
+
+        def add_picker(side, key, attr) -> None:
+            ctk.CTkLabel(pick_row, text=self._t(key), font=self._font(11, bold=True),
+                         text_color=INK_DIM, anchor="w").pack(side=side, padx=(0, 6))
+            menu = ctk.CTkOptionMenu(
+                pick_row, values=[self._t("compare_placeholder")],
+                command=lambda _v, a=attr: self._on_compare_select(),
+                fg_color=SURFACE_2, button_color=SURFACE_2, button_hover_color=TRACK_BG,
+                text_color=INK, font=self._font(10, bold=False),
+                dropdown_fg_color=SURFACE_2, dropdown_hover_color=TRACK_BG,
+                dropdown_text_color=INK, dropdown_font=self._font(10, bold=False),
+            )
+            menu.set(self._t("compare_placeholder"))
+            menu.pack(side=side, padx=(0, 12), fill="x", expand=True)
+            setattr(self, attr, menu)
+
+        add_picker("left", "compare_pick_a", "_compare_menu_a")
+        add_picker("right", "compare_pick_b", "_compare_menu_b")
+        self._compare_sel_a: SessionSummary | None = None
+        self._compare_sel_b: SessionSummary | None = None
+
+        # Result table: 項目 | 紀錄 A | 紀錄 B | A 比 B
+        self._compare_table = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
+        self._compare_table.pack(fill="x", padx=12, pady=(0, 6))
+        for c in range(4):
+            self._compare_table.grid_columnconfigure(c, weight=1 if c == 0 else 0)
+        self._compare_table.grid_columnconfigure(1, weight=1)
+        self._compare_table.grid_columnconfigure(2, weight=1)
+        self._compare_table.grid_columnconfigure(3, weight=1)
+
+        self._compare_rows: dict[str, tuple] = {}
+
+        def add_row(row: int, key: str, i18n_key: str, monospace: bool = True) -> None:
+            lbl = ctk.CTkLabel(self._compare_table, text=self._t(i18n_key), font=self._font(10, bold=True),
+                               text_color=INK_DIM, anchor="w")
+            lbl.grid(row=row, column=0, sticky="w", padx=(12, 6), pady=2)
+            a = ctk.CTkLabel(self._compare_table, text="—", font=_FONT_MONO_SM if monospace else self._font(10),
+                             text_color=INK, anchor="e")
+            a.grid(row=row, column=1, sticky="e", padx=(6, 6), pady=2)
+            b = ctk.CTkLabel(self._compare_table, text="—", font=_FONT_MONO_SM if monospace else self._font(10),
+                             text_color=INK, anchor="e")
+            b.grid(row=row, column=2, sticky="e", padx=(6, 6), pady=2)
+            d = ctk.CTkLabel(self._compare_table, text="—", font=_FONT_MONO_SM,
+                             text_color=INK_DIM, anchor="e")
+            d.grid(row=row, column=3, sticky="e", padx=(6, 12), pady=2)
+            self._compare_rows[key] = (a, b, d)
+
+        add_row(0, "duration", "compare_duration", monospace=False)
+        add_row(1, "map", "compare_map", monospace=False)
+        add_row(2, "exp", "compare_exp_total")
+        add_row(3, "expmin", "compare_exp_per_min")
+        add_row(4, "hpmin", "compare_hp_per_min")
+        add_row(5, "mpmin", "compare_mp_per_min")
+        add_row(6, "mesomin", "compare_meso_per_min")
+        add_row(7, "wild", "compare_wild_meso")
+        add_row(8, "equip", "compare_equip_meso")
+
+        self._refresh_compare_tab()
+
+    def _compare_label_for(self, summary: "SessionSummary") -> str:
+        """Dropdown label for one History record: name (or 紀錄 #n) plus its
+        start time so two records are distinguishable at a glance."""
+        for i, s in enumerate(self._session_history, start=1):
+            if s is summary:
+                name = s.name or self._t("history_session", n=i)
+                break
+        else:
+            name = self._t("history_session", n=0)
+        ts = time.strftime("%m-%d %H:%M", time.localtime(summary.start_time))
+        return f"{name}（{ts}）"
+
+    def _summary_from_label(self, label: str) -> SessionSummary | None:
+        for s in self._session_history:
+            if self._compare_label_for(s) == label:
+                return s
+        return None
+
+    def _refresh_compare_tab(self) -> None:
+        """Re-sync the Compare tab's dropdowns with the current session
+        history (called after any record is added/removed/cleared)."""
+        if not hasattr(self, "_compare_menu_a"):
+            return
+        values = [self._compare_label_for(s) for s in self._session_history]
+        placeholder = self._t("compare_placeholder")
+        if not values:
+            self._compare_empty_label.pack(fill="x", padx=12, pady=(12, 0))
+            self._compare_menu_a.configure(values=[placeholder])
+            self._compare_menu_b.configure(values=[placeholder])
+            self._compare_menu_a.set(placeholder)
+            self._compare_menu_b.set(placeholder)
+            self._compare_sel_a = None
+            self._compare_sel_b = None
+            self._on_compare_select()
+            return
+        self._compare_empty_label.pack_forget()
+        # Keep the previous selection if its record still exists.
+        def keep(old: SessionSummary | None, menu) -> SessionSummary | None:
+            if old is not None and old in self._session_history:
+                menu.configure(values=values)
+                menu.set(self._compare_label_for(old))
+                return old
+            menu.configure(values=values)
+            menu.set(placeholder)
+            return None
+        self._compare_sel_a = keep(self._compare_sel_a, self._compare_menu_a)
+        self._compare_sel_b = keep(self._compare_sel_b, self._compare_menu_b)
+        self._on_compare_select()
+
+    def _on_compare_select(self) -> None:
+        """Dropdown changed: resolve both selections and render the diff
+        table (or clear it when either side is unset)."""
+        if not hasattr(self, "_compare_rows"):
+            return
+        a_label = self._compare_menu_a.get()
+        b_label = self._compare_menu_b.get()
+        placeholder = self._t("compare_placeholder")
+        a = None if a_label == placeholder else self._summary_from_label(a_label)
+        b = None if b_label == placeholder else self._summary_from_label(b_label)
+        self._compare_sel_a = a
+        self._compare_sel_b = b
+
+        def set_row(key: str, a_val: str, b_val: str, diff: str | None = None,
+                    color: str = INK_DIM) -> None:
+            a_lbl, b_lbl, d_lbl = self._compare_rows[key]
+            a_lbl.configure(text=a_val, text_color=INK)
+            b_lbl.configure(text=b_val, text_color=INK)
+            d_lbl.configure(text=diff if diff is not None else "—", text_color=color)
+
+        for _a, _b, _d in self._compare_rows.values():
+            _a.configure(text="—", text_color=INK_DIM)
+            _b.configure(text="—", text_color=INK_DIM)
+            _d.configure(text="—", text_color=INK_DIM)
+        if a is None or b is None:
+            return
+
+        unit = self._t("unit_min_short")
+
+        def per_min(value: int | None, dur: float) -> float | None:
+            if value is None or dur <= 0:
+                return None
+            return value / dur * 60
+
+        def fmt_num(v) -> str:
+            return f"{v:,.0f}" if v is not None else "—"
+
+        def fmt_pct(a_v, b_v, invert: bool = False) -> tuple[str | None, str]:
+            """Signed % of A vs B. invert=True means lower is better (loss
+            metrics): the sign flips so positive always = A is better."""
+            if a_v is None or b_v is None or b_v == 0:
+                return None, INK_DIM
+            raw = (b_v - a_v) if invert else (a_v - b_v)
+            pct = raw / b_v * 100
+            color = OK_COLOR if pct > 0 else (HP_COLOR if pct < 0 else INK_DIM)
+            return f"{pct:+.0f}%", color
+
+        a_dur, b_dur = a.duration_s, b.duration_s
+        set_row("duration", f"{a_dur/60:.1f}{unit}", f"{b_dur/60:.1f}{unit}")
+        set_row("map", a.map_name or "—", b.map_name or "—")
+
+        a_exp, b_exp = a.exp_diff, b.exp_diff
+        pct, color = fmt_pct(a_exp, b_exp)
+        set_row("exp", fmt_num(a_exp), fmt_num(b_exp), pct, color)
+
+        a_epm, b_epm = a.exp_per_min, b.exp_per_min
+        pct, color = fmt_pct(a_epm, b_epm)
+        set_row("expmin", fmt_num(a_epm), fmt_num(b_epm), pct, color)
+
+        a_hp, b_hp = per_min(a.hp_loss, a_dur), per_min(b.hp_loss, b_dur)
+        pct, color = fmt_pct(a_hp, b_hp, invert=True)
+        set_row("hpmin", fmt_num(a_hp), fmt_num(b_hp), pct, color)
+
+        a_mp, b_mp = per_min(a.mp_loss, a_dur), per_min(b.mp_loss, b_dur)
+        pct, color = fmt_pct(a_mp, b_mp, invert=True)
+        set_row("mpmin", fmt_num(a_mp), fmt_num(b_mp), pct, color)
+
+        def total_meso(s: SessionSummary) -> int | None:
+            if s.meso_gained is not None:
+                return s.meso_gained + (s.sale_meso or 0)
+            if s.sale_meso:
+                return s.sale_meso
+            return None
+
+        a_meso, b_meso = per_min(total_meso(a), a_dur), per_min(total_meso(b), b_dur)
+        pct, color = fmt_pct(a_meso, b_meso)
+        set_row("mesomin", fmt_num(a_meso), fmt_num(b_meso), pct, color)
+
+        pct, color = fmt_pct(a.meso_gained, b.meso_gained)
+        set_row("wild", fmt_num(a.meso_gained), fmt_num(b.meso_gained), pct, color)
+
+        a_sale, b_sale = (a.sale_meso or 0) or None, (b.sale_meso or 0) or None
+        pct, color = fmt_pct(a_sale, b_sale)
+        set_row("equip", fmt_num(a_sale), fmt_num(b_sale), pct, color)
 
     def _build_settings_tab(self, parent) -> None:
         # Scrollable: at some WINDOW SCALE values the settings content is
@@ -1714,6 +1893,7 @@ class OverlayApp:
             self._append_history_card(summary, len(self._session_history))
             self._save_history()
             self._update_history_summary()
+            self._refresh_compare_tab()
 
     def _finalize_and_maybe_stop(self) -> None:
         """The timer rolling over. With auto_stop (default) the session stops
@@ -1938,29 +2118,22 @@ class OverlayApp:
             val = ctk.CTkLabel(cell, text="--", font=_FONT_MONO_SM, text_color=INK, anchor="e")
             val.grid(row=1, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
             self._compact_labels[key] = val
+            # Every cell gets a third line so all four come out the same
+            # height -- the EXP cell carries the level-up ETA there, the
+            # others a space placeholder (per user request 2026-08-28).
+            sub = ctk.CTkLabel(cell, text=" ", font=_FONT_MONO_SM, text_color=INK_DIM, anchor="e")
+            sub.grid(row=2, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
+            if key == "exp":
+                self._compact_eta = sub
             return cell
 
         add_cell("compact_hp_loss", "hploss", 0, 0, HP_COLOR)
         add_cell("compact_mp_loss", "mploss", 0, 1, MP_COLOR)
         add_cell("compact_meso", "meso", 1, 0, EXP_COLOR)
-        exp_cell = add_cell("compact_exp", "exp", 1, 1, EXP_COLOR)
-        # The EXP cell also carries the level-up ETA as a second value line.
-        self._compact_eta = ctk.CTkLabel(exp_cell, text="--", font=_FONT_MONO_SM, text_color=INK_DIM, anchor="e")
-        self._compact_eta.grid(row=2, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
+        add_cell("compact_exp", "exp", 1, 1, EXP_COLOR)
 
-        info_col = ctk.CTkFrame(win, fg_color="transparent")
-        info_col.pack(pady=(4, 2))
-        self._compact_timer = ctk.CTkLabel(info_col, text="--:--", font=self._font(11, bold=True), text_color=INK)
-        self._compact_timer.pack()
-
-        # Comparison line vs the History baseline picked on the History tab
-        # (see _on_compare_clicked). Hidden until a baseline exists -- it
-        # lives in its own container (info_col) so pack_forget/repack here
-        # can't reorder the window's top-level layout.
-        self._compact_compare_label = ctk.CTkLabel(
-            info_col, text="", font=self._font(10, bold=True), text_color=INK_FAINT,
-        )
-        self._compact_compare_label.pack(pady=(2, 0))
+        self._compact_timer = ctk.CTkLabel(win, text="--:--", font=self._font(11, bold=True), text_color=INK)
+        self._compact_timer.pack(pady=(4, 2))
 
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(fill="x", padx=6, pady=(0, 8))
@@ -2062,7 +2235,6 @@ class OverlayApp:
             remaining = max(0.0, self._settings.window_min * 60 - self._session.elapsed())
             timer_text = self._t("timer_left", time=f"{int(remaining // 60)}:{int(remaining % 60):02d}")
         self._compact_timer.configure(text=timer_text)
-        self._update_compact_compare_line()
 
     def _rebuild_history_cards(self) -> None:
         for card in self._history_cards:
@@ -2097,12 +2269,10 @@ class OverlayApp:
 
         head = ctk.CTkFrame(card, fg_color="transparent")
         head.pack(fill="x", padx=12, pady=(10, 0))
-        # Three columns so the duration lands dead-centre of the header row
-        # (per user request 2026-08-27): title/badges left, duration middle,
-        # action buttons right.
+        # Two columns: title/badges left, duration + delete button right
+        # (duration sits in the top-right corner per user request 2026-08-28).
         head.grid_columnconfigure(0, weight=1)
         head.grid_columnconfigure(1, weight=0)
-        head.grid_columnconfigure(2, weight=1)
 
         head_left = ctk.CTkFrame(head, fg_color="transparent")
         head_left.grid(row=0, column=0, sticky="w")
@@ -2113,16 +2283,6 @@ class OverlayApp:
         title_label.pack(side="left")
         title_label.bind("<Button-1>", lambda _e, i=index, lbl=title_label: self._on_rename_clicked(i, lbl))
 
-        # Baseline badge (2026-08-26): marks the History record currently
-        # picked as the comparison baseline (see _on_compare_clicked).
-        if self._settings.compare_start_time is not None and abs(
-            summary.start_time - self._settings.compare_start_time
-        ) < 1e-6:
-            ctk.CTkLabel(
-                head_left, text=self._t("history_compare_badge"), font=self._font(9, bold=True),
-                text_color=ACCENT_INK, fg_color=ACCENT, corner_radius=6, padx=5, pady=1,
-            ).pack(side="left", padx=(8, 0))
-
         # Map badge (requested 2026-08-24): the session's map as a small accent
         # pill next to the title, so a History card is self-describing about
         # *where* it was recorded. Omitted when the map was never set.
@@ -2132,38 +2292,21 @@ class OverlayApp:
                 text_color=ACCENT, fg_color=SURFACE_2, corner_radius=6, padx=6, pady=1,
             ).pack(side="left", padx=(8, 0))
 
-        dur_min = summary.duration_s / 60
-        # Duration shown as-is (e.g. "4.6分") -- the old early-restart
-        # annotation ("5.5分 / 5分，提前重啟") was removed per user request
-        # (2026-08-27): the session's own start→end time is the point, and
-        # the target interval is already visible on the timestamp line.
-        unit = self._t("unit_min_short")
-        dur_text, dur_color, dur_font = f"{dur_min:.1f}{unit}", INK_DIM, _FONT_MONO_SM
-        ctk.CTkLabel(head, text=dur_text, font=dur_font, text_color=dur_color).grid(row=0, column=1)
-
         head_right = ctk.CTkFrame(head, fg_color="transparent")
-        head_right.grid(row=0, column=2, sticky="e")
-        # Packed first so it lands rightmost -- pack(side="right") stacks from
-        # the outer edge inward in packing order.
+        head_right.grid(row=0, column=1, sticky="e")
+        # Delete button packed first so it lands rightmost -- pack(side="right")
+        # stacks from the outer edge inward in packing order.
         ctk.CTkButton(
             head_right, text="×", width=22, height=18, command=lambda i=index: self._on_delete_history_clicked(i),
             fg_color="transparent", hover_color=SURFACE_2, text_color=INK_FAINT, font=_FONT_UI_BOLD,
         ).pack(side="right")
 
-        # Compare toggle (2026-08-26): packs AFTER the × button so it lands
-        # just left of it. Toggles this record as the comparison baseline
-        # (see _on_compare_clicked).
-        is_base = self._settings.compare_start_time is not None and abs(
-            summary.start_time - self._settings.compare_start_time
-        ) < 1e-6
-        ctk.CTkButton(
-            head_right,
-            text=self._t("history_compare_unset_button" if is_base else "history_compare_button"),
-            width=72, height=18, command=lambda i=index: self._on_compare_clicked(i),
-            fg_color=TRACK_BG if is_base else SURFACE_2,
-            hover_color=TRACK_BG, text_color=OK_COLOR if is_base else ACCENT,
-            font=self._font(9, bold=True), corner_radius=6,
-        ).pack(side="right", padx=(0, 4))
+        # Duration (e.g. "4.6分") in the top-right corner, left of the delete
+        # button. Shown as-is -- no early-restart annotation (per 2026-08-27).
+        dur_min = summary.duration_s / 60
+        unit = self._t("unit_min_short")
+        dur_text, dur_color, dur_font = f"{dur_min:.1f}{unit}", INK_DIM, _FONT_MONO_SM
+        ctk.CTkLabel(head_right, text=dur_text, font=dur_font, text_color=dur_color).pack(side="right", padx=(0, 6))
 
         timestamp = ctk.CTkFrame(card, fg_color="transparent")
         timestamp.pack(fill="x", padx=12, pady=(0, 4))
@@ -2221,7 +2364,10 @@ class OverlayApp:
             ctk.CTkLabel(box, text=value, font=_FONT_MONO_SM, text_color=color, anchor="w").pack(
                 fill="x", padx=8, pady=(0, 6)
             )
-            ctk.CTkLabel(box, text=sub or " ", font=_FONT_MONO_SM, text_color=sub_color, anchor="w").pack(
+            # Sub line uses the UI font family (same as the cell titles), so
+            # the CJK 野生/裝備 labels render in the same font as the rest of
+            # the card instead of a mono-font fallback (per 2026-08-28).
+            ctk.CTkLabel(box, text=sub or " ", font=self._font(10), text_color=sub_color, anchor="w").pack(
                 fill="x", padx=8, pady=(0, 6)
             )
 
@@ -2313,20 +2459,12 @@ class OverlayApp:
         if not confirmed:
             return
         del self._session_history[index - 1]
-        # The deleted record may have been the comparison baseline -- clear
-        # the stale reference (see _on_compare_clicked).
-        if self._settings.compare_start_time is not None and abs(
-            summary.start_time - self._settings.compare_start_time
-        ) < 1e-6:
-            self._settings.compare_start_time = None
-            self._persist_settings()
         # Every remaining card's 1-based index shifts once one entry is
         # removed -- rebuild from scratch rather than patching indices in
         # place, same as _on_clear_history_clicked already does.
         self._rebuild_history_cards()
         self._save_history()
-        self._update_compare_card()
-        self._update_compact_compare_line()
+        self._refresh_compare_tab()
 
     def _on_clear_history_clicked(self) -> None:
         if not self._session_history:
@@ -2340,163 +2478,9 @@ class OverlayApp:
         if not confirmed:
             return
         self._session_history.clear()
-        if self._settings.compare_start_time is not None:
-            self._settings.compare_start_time = None
-            self._persist_settings()
         self._rebuild_history_cards()
         self._save_history()
-        self._update_compare_card()
-        self._update_compact_compare_line()
-
-    # ---- comparison baseline (2026-08-26) --------------------------------
-
-    def _on_compare_clicked(self, index: int) -> None:
-        """Toggle the clicked History record as the comparison baseline. The
-        baseline's per-minute metrics are compared against live sessions on
-        the Dashboard and the compact overlay (see _update_compare_card /
-        _update_compact_compare_line). Persisted so it survives a restart.
-        Clicking a different record replaces the baseline; clicking the
-        current baseline clears it."""
-        summary = self._session_history[index - 1]
-        current = self._settings.compare_start_time
-        if current is not None and abs(summary.start_time - current) < 1e-6:
-            self._settings.compare_start_time = None
-        else:
-            self._settings.compare_start_time = summary.start_time
-        self._persist_settings()
-        self._rebuild_history_cards()
-        self._update_compare_card()
-        self._update_compact_compare_line()
-
-    def _compare_base(self) -> "SessionSummary | None":
-        """The History record currently picked as the comparison baseline, or
-        None. Matched by start_time (see Settings.compare_start_time)."""
-        start = self._settings.compare_start_time
-        if start is None:
-            return None
-        for summary in self._session_history:
-            if abs(summary.start_time - start) < 1e-6:
-                return summary
-        return None
-
-    def _compare_base_name(self, base: "SessionSummary") -> str:
-        """Display name for the baseline: its custom name when renamed, else
-        its 1-based History index (\"紀錄 #3\")."""
-        if base.name:
-            return base.name
-        for i, summary in enumerate(self._session_history, start=1):
-            if summary is base:
-                return self._t("history_session", n=i)
-        return self._t("history_session", n=0)
-
-    def _compare_exp_pct(self, base: "SessionSummary") -> float | None:
-        """Live EXP/min vs the baseline's EXP/min as a signed fraction
-        (e.g. 0.12 = +12%). None when either side has no EXP data yet."""
-        cur = self._session.exp_diff
-        elapsed = self._session.elapsed()
-        if cur is None or elapsed <= 0:
-            return None
-        base_epm = base.exp_per_min
-        if not base_epm:
-            return None
-        cur_epm = cur / elapsed * 60
-        return cur_epm / base_epm - 1
-
-    def _update_compare_card(self) -> None:
-        """Refresh the Dashboard's comparison card: baseline badge + one
-        per-minute row per metric (EXP/HP/MP/meso), each showing the live
-        value, the baseline value, and the signed percentage difference.
-        Green = better than baseline, red = worse (loss metrics invert).
-        Without a baseline, only the hint line is shown. No-op when the
-        card doesn't exist (unit-test stubs without the Dashboard)."""
-        if getattr(self, "_compare_card", None) is None:
-            return
-        base = self._compare_base()
-        if base is None:
-            self._compare_base_badge.configure(text="")
-            for lbl in self._compare_labels.values():
-                lbl.grid_remove()
-            self._compare_no_base_label.grid()
-            return
-        self._compare_base_badge.configure(text=self._compare_base_name(base))
-        self._compare_no_base_label.grid_remove()
-
-        elapsed = self._session.elapsed()
-        base_dur = base.duration_s
-
-        def per_min(value: int | None, dur: float) -> float | None:
-            if value is None or dur <= 0:
-                return None
-            return value / dur * 60
-
-        def fmt_compare(cur: float | None, ref: float | None, invert: bool) -> str:
-            if cur is None or ref is None:
-                return "--"
-            pct = (cur / ref - 1) * 100 if ref else 0.0
-            return f"{cur:,.0f} / {ref:,.0f}  {pct:+.0f}%"
-
-        def color_for(cur: float | None, ref: float | None, invert: bool) -> str:
-            if cur is None or ref is None:
-                return INK_FAINT
-            if ref <= 0:
-                return INK
-            better = (cur < ref) if invert else (cur > ref)
-            return OK_COLOR if better else HP_COLOR
-
-        # EXP/min -- higher is better.
-        cur_epm = per_min(self._session.exp_diff, elapsed)
-        ref_epm = base.exp_per_min
-        self._compare_labels["exp"].configure(
-            text=fmt_compare(cur_epm, ref_epm, False),
-            text_color=color_for(cur_epm, ref_epm, False),
-        )
-        # HP/MP loss/min -- lower is better (invert).
-        cur_hp = per_min(self._session.hp_loss, elapsed)
-        ref_hp = per_min(base.hp_loss, base_dur)
-        self._compare_labels["hp"].configure(
-            text=fmt_compare(cur_hp, ref_hp, True),
-            text_color=color_for(cur_hp, ref_hp, True),
-        )
-        cur_mp = per_min(self._session.mp_loss, elapsed)
-        ref_mp = per_min(base.mp_loss, base_dur)
-        self._compare_labels["mp"].configure(
-            text=fmt_compare(cur_mp, ref_mp, True),
-            text_color=color_for(cur_mp, ref_mp, True),
-        )
-        # Meso/min -- higher is better. Baseline total includes sale revenue.
-        cur_meso = per_min(self._session.total_meso, elapsed)
-        base_meso_total = None
-        if base.meso_gained is not None:
-            base_meso_total = base.meso_gained + (base.sale_meso or 0)
-        elif base.sale_meso:
-            base_meso_total = base.sale_meso
-        ref_meso = per_min(base_meso_total, base_dur)
-        self._compare_labels["meso"].configure(
-            text=fmt_compare(cur_meso, ref_meso, False),
-            text_color=color_for(cur_meso, ref_meso, False),
-        )
-        for lbl in self._compare_labels.values():
-            lbl.grid()
-
-    def _update_compact_compare_line(self) -> None:
-        """Refresh the compact overlay's comparison line (EXP/min vs the
-        baseline -- the headline metric users track most). Hidden when no
-        baseline is selected or there's no EXP data yet."""
-        if getattr(self, "_compact_compare_label", None) is None:
-            return
-        base = self._compare_base()
-        if base is None:
-            self._compact_compare_label.pack_forget()
-            return
-        pct = self._compare_exp_pct(base)
-        if pct is None:
-            self._compact_compare_label.pack_forget()
-            return
-        self._compact_compare_label.configure(
-            text=self._t("compact_compare", name=self._compare_base_name(base), pct=f"{pct * 100:+.0f}"),
-            text_color=OK_COLOR if pct >= 0 else HP_COLOR,
-        )
-        self._compact_compare_label.pack(pady=(2, 0))
+        self._refresh_compare_tab()
 
     def _set_status_error(self, text: str) -> None:
         self._status_pill.configure(text=text, fg_color=SURFACE_2, text_color=HP_COLOR)
@@ -2804,7 +2788,6 @@ class OverlayApp:
                 self._compat_hint_label.grid()
             else:
                 self._compat_hint_label.grid_remove()
-        self._update_compare_card()
         self._render_compact(snap)
 
     def run(self) -> None:

@@ -18,6 +18,7 @@ Lang = Literal["en", "zh"]
 _STRINGS: dict[str, dict[Lang, str]] = {
     "tab_live": {"en": "Dashboard", "zh": "儀錶板"},
     "tab_history": {"en": "History", "zh": "紀錄"},
+    "tab_compare": {"en": "Compare", "zh": "比較"},
     "tab_settings": {"en": "Settings", "zh": "設定"},
 
     "status_tracking": {"en": "Tracking", "zh": "追蹤中"},
@@ -67,20 +68,6 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "history_exp_per_min": {"en": "EXP/MIN", "zh": "經驗/分"},
     "history_restarted_early": {"en": "restarted early", "zh": "提前重啟"},
     "history_clear_button": {"en": "Clear History", "zh": "清除紀錄"},
-    "history_compare_button": {"en": "Compare", "zh": "比較"},
-    "history_compare_unset_button": {"en": "Cancel", "zh": "取消比較"},
-    "history_compare_badge": {"en": "BASELINE", "zh": "基準"},
-    "compare_card_title": {"en": "COMPARE", "zh": "比較"},
-    "compare_no_base": {
-        "en": "Pick a baseline on the History tab to compare sessions",
-        "zh": "在「紀錄」分頁選一筆紀錄即可比較",
-    },
-    "kv_compare_base": {"en": "vs baseline", "zh": "比較基準"},
-    "kv_compare_exp": {"en": "EXP/min", "zh": "經驗/分"},
-    "kv_compare_hp": {"en": "HP loss/min", "zh": "HP 損失/分"},
-    "kv_compare_mp": {"en": "MP loss/min", "zh": "MP 損失/分"},
-    "kv_compare_meso": {"en": "Meso/min", "zh": "楓幣/分"},
-    "compact_compare": {"en": "vs {name} {pct}%", "zh": "比 {name} {pct}%"},
     # Manual stat edit (see _on_stat_edit) -- the player can correct an OCR
     # misread directly on the Dashboard instead of being stuck with it.
     "stat_edit_title": {"en": "Edit value", "zh": "手動調整"},
@@ -93,6 +80,28 @@ _STRINGS: dict[str, dict[Lang, str]] = {
         "zh": "留空並確定可清除手動值（恢復自動讀取）。",
     },
     "history_clear_confirm_title": {"en": "Clear history", "zh": "清除紀錄"},
+    # Compare tab (2026-08-28): pick two History records via dropdowns and
+    # diff their per-minute metrics side by side.
+    "compare_pick_a": {"en": "Record A", "zh": "紀錄 A"},
+    "compare_pick_b": {"en": "Record B", "zh": "紀錄 B"},
+    "compare_placeholder": {"en": "— 選擇紀錄 —", "zh": "— 選擇紀錄 —"},
+    "compare_no_sessions": {
+        "en": "No sessions yet — finish a session first.",
+        "zh": "尚無紀錄，請先完成一段紀錄。",
+    },
+    "compare_metric": {"en": "Metric", "zh": "項目"},
+    "compare_duration": {"en": "Duration", "zh": "時長"},
+    "compare_map": {"en": "Map", "zh": "地圖"},
+    "compare_exp_total": {"en": "EXP", "zh": "經驗值"},
+    "compare_exp_per_min": {"en": "EXP/min", "zh": "經驗/分"},
+    "compare_hp_per_min": {"en": "HP loss/min", "zh": "HP 損失/分"},
+    "compare_mp_per_min": {"en": "MP loss/min", "zh": "MP 損失/分"},
+    "compare_meso_per_min": {"en": "Meso/min", "zh": "楓幣/分"},
+    "compare_wild_meso": {"en": "Wild meso", "zh": "野生楓幣"},
+    "compare_equip_meso": {"en": "Equip drops", "zh": "裝備+掉落物"},
+    "compare_diff": {"en": "A vs B", "zh": "A 比 B"},
+    "compare_diff_none": {"en": "—", "zh": "—"},
+    "compare_record_name": {"en": "{label} #{n}", "zh": "{label} #{n}"},
     "history_clear_confirm_prompt": {
         "en": "Delete all {n} session(s)? This can't be undone.",
         "zh": "刪除全部 {n} 筆紀錄？此動作無法復原。",

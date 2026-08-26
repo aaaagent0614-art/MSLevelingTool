@@ -125,4 +125,7 @@ class Settings:
     # user picked on the History tab to compare new sessions against. None
     # while no baseline is selected. Start-time (not list index) is the key
     # so deleting/renaming sessions never shifts the reference.
+    # DEPRECATED (2026-08-28): the compare feature moved to a dedicated
+    # fourth tab with two dropdowns (see _build_compare_tab); this field is
+    # kept only so old settings files still load.
     compare_start_time: float | None = None
