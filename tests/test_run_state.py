@@ -145,6 +145,12 @@ class _StubApp:
     def _check_screen_change(self):
         pass  # screen-size warning -- out of scope for run-state tests
 
+    def _update_compact_visibility(self):
+        pass  # compact 2x2 overlay -- out of scope for run-state tests
+
+    def _render_compact(self, _snap):
+        pass  # compact 2x2 overlay -- out of scope for run-state tests
+
     # Bound to the real implementations -- these are the actual behaviour
     # under test, not stand-ins.
     _t = OverlayApp._t

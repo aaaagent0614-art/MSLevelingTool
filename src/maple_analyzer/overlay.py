@@ -300,6 +300,10 @@ class OverlayApp:
         # _run_manual_detection): the result text is shown until this timestamp.
         self._detect_result_until = 0.0
         self._detect_result_text = ""
+        # Compact 2x2 gameplay overlay (see _ensure_compact_win) -- shown while
+        # a session is running so the full window can stay minimized.
+        self._compact_win = None
+        self._compact_labels: dict[str, ctk.CTkLabel] = {}
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -1568,6 +1572,116 @@ class OverlayApp:
             self._pause_button.grid(row=0, column=0, columnspan=1, sticky="ew", padx=(0, 3))
             self._stop_button.grid_remove()
             self._restart_button.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(3, 0))
+        self._update_compact_visibility()
+
+    # ---- compact 2x2 overlay --------------------------------------------
+
+    def _ensure_compact_win(self) -> None:
+        """Create the small always-on-top 2x2 overlay (once)."""
+        if self._compact_win is not None:
+            return
+        win = ctk.CTkToplevel(self.root)
+        win.title("MsStatTractor")
+        win.attributes("-topmost", True)
+        win.configure(fg_color=BG)
+        win.geometry("260x210+60+60")
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", self._on_restore_main)
+        self._compact_win = win
+
+        grid = ctk.CTkFrame(win, fg_color=BG)
+        grid.pack(fill="both", expand=True, padx=6, pady=(6, 0))
+        grid.grid_columnconfigure(0, weight=1)
+        grid.grid_columnconfigure(1, weight=1)
+        grid.grid_rowconfigure(0, weight=1)
+        grid.grid_rowconfigure(1, weight=1)
+
+        for label_text, key, r, c, color in (
+            ("LV", "level", 0, 0, EXP_COLOR),
+            ("HP", "hp", 0, 1, HP_COLOR),
+            ("MP", "mp", 1, 0, MP_COLOR),
+            ("EXP", "exp", 1, 1, EXP_COLOR),
+        ):
+            cell = ctk.CTkFrame(grid, fg_color=SURFACE, corner_radius=8)
+            cell.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
+            cell.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(cell, text=label_text, font=_FONT_LABEL, text_color=color, anchor="w").grid(
+                row=0, column=0, sticky="w", padx=(8, 0), pady=(4, 0)
+            )
+            val = ctk.CTkLabel(cell, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
+            val.grid(row=1, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
+            self._compact_labels[key] = val
+
+        self._compact_timer = ctk.CTkLabel(win, text="--:--", font=self._font(11, bold=True), text_color=INK)
+        self._compact_timer.pack(pady=(4, 2))
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=6, pady=(0, 6))
+        self._compact_pause_btn = ctk.CTkButton(
+            btn_row, text=self._t("pause_button"), command=self._on_pause_button_clicked,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
+            height=26, font=self._font(11, bold=True),
+        )
+        self._compact_pause_btn.pack(side="left", expand=True, fill="x", padx=(0, 3))
+        self._compact_stop_btn = ctk.CTkButton(
+            btn_row, text=self._t("stop_button"), command=self._on_stop_clicked,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=HP_COLOR,
+            height=26, font=self._font(11, bold=True),
+        )
+        self._compact_stop_btn.pack(side="left", expand=True, fill="x", padx=(0, 3))
+        self._compact_restore_btn = ctk.CTkButton(
+            btn_row, text=self._t("compact_restore"), command=self._on_restore_main,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
+            height=26, font=self._font(11, bold=True),
+        )
+        self._compact_restore_btn.pack(side="left", expand=True, fill="x")
+
+    def _update_compact_visibility(self) -> None:
+        """Running/paused -> minimize the full window and show the 2x2 overlay;
+        stopped -> hide the overlay and restore the full window."""
+        if self._run_state in ("running", "paused"):
+            self._ensure_compact_win()
+            self._compact_win.deiconify()
+            self._compact_pause_btn.configure(
+                text=self._t("pause_button" if self._run_state == "running" else "resume_button")
+            )
+            self.root.iconify()
+        else:
+            if self._compact_win is not None:
+                self._compact_win.withdraw()
+            self.root.deiconify()
+
+    def _on_restore_main(self) -> None:
+        """Toggle the full window between minimized and normal (the compact
+        overlay stays up either way)."""
+        if self.root.state() == "iconic":
+            self.root.deiconify()
+        else:
+            self.root.iconify()
+
+    def _render_compact(self, snap) -> None:
+        if self._compact_win is None or not self._compact_win.winfo_exists():
+            return
+        self._compact_labels["level"].configure(text=str(snap.level) if snap.level is not None else "--")
+        self._compact_labels["hp"].configure(
+            text=f"{snap.hp_cur}/{snap.hp_max}" if snap.hp_cur is not None else "--"
+        )
+        self._compact_labels["mp"].configure(
+            text=f"{snap.mp_cur}/{snap.mp_max}" if snap.mp_cur is not None else "--"
+        )
+        start_exp = self._session.start_exp
+        exp_diff = self._session.exp_diff
+        if snap.exp_cur is not None:
+            display = (start_exp + exp_diff) if (start_exp is not None and exp_diff is not None) else snap.exp_cur
+            self._compact_labels["exp"].configure(text=f"{display:,}")
+        else:
+            self._compact_labels["exp"].configure(text="--")
+        if self._run_state == "stopped":
+            timer_text = "--:--"
+        else:
+            remaining = max(0.0, self._settings.window_min * 60 - self._session.elapsed())
+            timer_text = self._t("timer_left", time=f"{int(remaining // 60)}:{int(remaining % 60):02d}")
+        self._compact_timer.configure(text=timer_text)
 
     def _rebuild_history_cards(self) -> None:
         for card in self._history_cards:
@@ -2066,6 +2180,7 @@ class OverlayApp:
                 self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
             else:
                 self._status_pill.configure(text=self._t("status_tracking"), fg_color=TRACK_BG, text_color=OK_COLOR)
+        self._render_compact(snap)
 
     def run(self) -> None:
         self.root.mainloop()
