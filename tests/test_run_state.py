@@ -58,6 +58,9 @@ class _StubRoot:
     def destroy(self):
         pass
 
+    def update_idletasks(self):
+        pass
+
 
 class _StubSource:
     """Fakes capture.py's PanelSource: grab_fields() returns already-"OCR'd"
@@ -125,6 +128,7 @@ class _StubApp:
         self._bars: dict = defaultdict(_StubWidget)
         self._map_value_label = _StubWidget()
         self._compact_win = None
+        self._manual_overrides: dict = {}
 
         self.rebuild_calls = 0
 
@@ -189,6 +193,8 @@ class _StubApp:
     _on_delete_history_clicked = OverlayApp._on_delete_history_clicked
     _update_compare_card = OverlayApp._update_compare_card
     _update_compact_compare_line = OverlayApp._update_compact_compare_line
+    _apply_manual_overrides = OverlayApp._apply_manual_overrides
+    _read_detected_values = OverlayApp._read_detected_values
 
 
 def _calibrate(app: _StubApp, gains=(100,)) -> None:
@@ -464,7 +470,7 @@ def test_start_without_sale_prompts_and_can_stay_stopped(monkeypatch):
     assert app._session_history == []
 
 
-def test_record_sale_records_and_marks_sale_recorded(monkeypatch):
+def test_record_sale_records_and_commits_to_history(monkeypatch):
     app = _StubApp()
     app._on_pause_button_clicked()
     _calibrate(app, gains=(100,))
@@ -474,9 +480,15 @@ def test_record_sale_records_and_marks_sale_recorded(monkeypatch):
     app._on_stop_clicked()  # pending
     monkeypatch.setattr(app, "_read_meso_now", lambda: 1_500_000)
     app._on_record_sale_clicked()
-    assert app._sale_recorded is True
     assert app._session.sale_revenue == 250_000
     assert app._session.total_meso == 500_000  # 250k drops + 250k sale
+    # New behaviour (2026-08-27): recording the sale commits the session to
+    # History immediately -- no waiting for the next Start.
+    assert app._session_pending is False
+    assert app._sale_recorded is False
+    assert len(app._session_history) == 1
+    assert app._session_history[0].sale_meso == 250_000
+    assert app._session_history[0].meso_gained == 250_000
 
 
 def test_record_sale_without_inventory_does_not_mark_recorded(monkeypatch):

@@ -61,6 +61,8 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "history_hp_loss": {"en": "HP LOSS", "zh": "HP 損失"},
     "history_mp_loss": {"en": "MP LOSS", "zh": "MP 損失"},
     "history_meso": {"en": "MESO", "zh": "楓幣"},
+    "history_meso_wild": {"en": "Wild {n}", "zh": "野生 {n}"},
+    "history_meso_equip": {"en": "Equip {n}", "zh": "裝備 {n}"},
     "history_exp": {"en": "EXP", "zh": "經驗值"},
     "history_exp_per_min": {"en": "EXP/MIN", "zh": "經驗/分"},
     "history_restarted_early": {"en": "restarted early", "zh": "提前重啟"},
@@ -79,6 +81,17 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "kv_compare_mp": {"en": "MP loss/min", "zh": "MP 損失/分"},
     "kv_compare_meso": {"en": "Meso/min", "zh": "楓幣/分"},
     "compact_compare": {"en": "vs {name} {pct}%", "zh": "比 {name} {pct}%"},
+    # Manual stat edit (see _on_stat_edit) -- the player can correct an OCR
+    # misread directly on the Dashboard instead of being stuck with it.
+    "stat_edit_title": {"en": "Edit value", "zh": "手動調整"},
+    "stat_edit_prompt_level": {"en": "LV:", "zh": "LV："},
+    "stat_edit_prompt_hp": {"en": "HP (current):", "zh": "HP（目前）："},
+    "stat_edit_prompt_mp": {"en": "MP (current):", "zh": "MP（目前）："},
+    "stat_edit_prompt_exp": {"en": "EXP (cumulative):", "zh": "EXP（累計）："},
+    "stat_edit_hint": {
+        "en": "Empty input clears the manual value (revert to OCR).",
+        "zh": "留空並確定可清除手動值（恢復自動讀取）。",
+    },
     "history_clear_confirm_title": {"en": "Clear history", "zh": "清除紀錄"},
     "history_clear_confirm_prompt": {
         "en": "Delete all {n} session(s)? This can't be undone.",

@@ -319,6 +319,11 @@ class OverlayApp:
         # a session is running so the full window can stay minimized.
         self._compact_win = None
         self._compact_labels: dict[str, ctk.CTkLabel] = {}
+        # Manual stat overrides (2026-08-27): values the player typed over an
+        # OCR misread on the Dashboard (see _on_stat_edit). Folded into the
+        # merged snapshot every tick (see _apply_manual_overrides) until
+        # cleared by another edit or a 辨識 pass re-reads the game.
+        self._manual_overrides: dict[str, int] = {}
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -545,6 +550,10 @@ class OverlayApp:
             lbl.grid(row=row, column=0, sticky="w", padx=(12, 6), pady=0)
             value = ctk.CTkLabel(stats, text="--", font=_FONT_MONO, text_color=INK, anchor="e")
             value.grid(row=row, column=2, sticky="e", padx=(6, 12), pady=0)
+            # Editable on click (2026-08-27): the player can correct an OCR
+            # misread by hand -- see _on_stat_edit.
+            value.bind("<Button-1>", lambda _e, k=key: self._on_stat_edit(k))
+            value.configure(cursor="hand2")
             bar = None
             if with_bar:
                 bar = ctk.CTkProgressBar(stats, height=5, progress_color=color, fg_color=SURFACE_2)
@@ -1250,6 +1259,11 @@ class OverlayApp:
             for new, old in zip(vars(snap).values(), vars(self._last).values())
         ))
         self._last = merged
+        # Hand-typed corrections (see _on_stat_edit) fold in on top of the
+        # merged OCR snapshot, so both the HUD and Session.record see the
+        # player-corrected values instead of the misread ones.
+        self._apply_manual_overrides()
+        merged = self._last
         # hp_max/mp_max are passed purely so Session can sanity-check them --
         # a tick whose max doesn't match the rest of the session was misparsed
         # (see rate.py's _LossTracker) and is dropped before it can inflate the
@@ -1369,6 +1383,7 @@ class OverlayApp:
         )
         self.root.update_idletasks()
         stat_frac, meso_frac, meso_value = {}, None, None
+        frame = None
         try:
             if sys.platform == "win32":
                 from .capture import GameWindowCapture
@@ -1391,6 +1406,12 @@ class OverlayApp:
             stat_frac, meso_frac, meso_value = {}, None, None
         self._apply_locate(stat_frac, meso_frac, meso_value)
         self._set_detect_result(stat_frac, meso_frac)
+        # A fresh 辨識 pass re-reads the game, so any hand-typed corrections
+        # from before are cleared (they'd fight the new detection), and the
+        # values just detected are shown immediately for confirmation.
+        self._manual_overrides.clear()
+        if frame is not None and stat_frac:
+            self._read_detected_values(frame, stat_frac)
         self._render(self._last)
 
     def _run_manual_detection(self) -> None:
@@ -1415,6 +1436,7 @@ class OverlayApp:
         )
         self.root.update_idletasks()
         stat_frac, meso_frac, meso_value = {}, None, None
+        frame = None
         try:
             from .capture import ManualScreenCapture
 
@@ -1439,6 +1461,11 @@ class OverlayApp:
             stat_frac, meso_frac, meso_value = {}, None, None
         self._apply_locate(stat_frac, meso_frac, meso_value)
         self._set_detect_result(stat_frac, meso_frac)
+        # Same as auto mode: clear hand-typed corrections and show the freshly
+        # detected values immediately (see _read_detected_values).
+        self._manual_overrides.clear()
+        if frame is not None and stat_frac:
+            self._read_detected_values(frame, stat_frac)
         self._render(self._last)
 
     def _on_detect_clicked(self) -> None:
@@ -1448,6 +1475,89 @@ class OverlayApp:
             self._run_manual_detection()
         else:
             self._run_auto_detection()
+
+    # ---- manual stat correction (2026-08-27) ------------------------------
+
+    def _on_stat_edit(self, key: str) -> None:
+        """Let the player correct an OCR misread by typing the real value of a
+        stat field (LV/HP/MP/EXP). Empty input clears the manual value and
+        reverts to the OCR stream. The typed value overrides the tick stream
+        (see _apply_manual_overrides) until cleared by another edit or a 辨識
+        pass re-reads the game. HP/MP edit the *current* value only -- the max
+        is left untouched."""
+        prompts = {
+            "level": ("stat_edit_prompt_level", "level"),
+            "hp": ("stat_edit_prompt_hp", "hp_cur"),
+            "mp": ("stat_edit_prompt_mp", "mp_cur"),
+            "exp": ("stat_edit_prompt_exp", "exp_cur"),
+        }
+        if key not in prompts:
+            return
+        prompt_key, snap_attr = prompts[key]
+        current = self._manual_overrides.get(key)
+        if current is None:
+            current = getattr(self._last, snap_attr)
+        initial = f"{current:,}" if current is not None else ""
+        with self._modal():
+            result = simpledialog.askstring(
+                self._t("stat_edit_title"),
+                self._t(prompt_key) + "\n\n" + self._t("stat_edit_hint"),
+                initialvalue=initial,
+                parent=self.root,
+            )
+        if result is None:
+            return  # cancelled
+        result = result.strip().replace(",", "")
+        if result == "":
+            self._manual_overrides.pop(key, None)
+        else:
+            try:
+                self._manual_overrides[key] = int(result)
+            except ValueError:
+                return  # not a number -- keep the previous state
+        self._apply_manual_overrides()
+        self._render(self._last)
+
+    def _apply_manual_overrides(self) -> None:
+        """Fold the player's manual stat corrections into self._last so the
+        HUD (and Session.record on the next tick) see the corrected values.
+        No-op when no override is active."""
+        ov = self._manual_overrides
+        if not ov:
+            return
+        self._last = StatSnapshot(
+            level=ov.get("level", self._last.level),
+            hp_cur=ov.get("hp", self._last.hp_cur),
+            hp_max=self._last.hp_max,
+            mp_cur=ov.get("mp", self._last.mp_cur),
+            mp_max=self._last.mp_max,
+            exp_cur=ov.get("exp", self._last.exp_cur),
+            exp_pct=self._last.exp_pct,
+        )
+
+    def _read_detected_values(self, frame, stat_frac: dict) -> None:
+        """Immediately show the values OCR'd from the detected field boxes
+        after a 辨識 pass, so the player can confirm every stat was caught
+        (and correct any misread by hand). Merges into _last exactly like a
+        normal tick would; a failed read leaves the previous values in place."""
+        try:
+            fw, fh = frame.size
+            field_images = {}
+            for name, (fx, fy, fw2, fh2) in stat_frac.items():
+                x = max(0, int(fx * fw) - 2)
+                y = max(0, int(fy * fh) - 2)
+                w = max(1, int(fw2 * fw) + 4)
+                h = max(1, int(fh2 * fh) + 4)
+                field_images[name] = frame.crop((x, y, min(fw, x + w), min(fh, y + h)))
+            field_text = {name: self._ocr.read_field(img) for name, img in field_images.items()}
+            snap = parse_fields(field_text)
+            merged = StatSnapshot(*(
+                new if new is not None else old
+                for new, old in zip(vars(snap).values(), vars(self._last).values())
+            ))
+            self._last = merged
+        except Exception:
+            pass
 
     def _set_detect_result(self, stat_frac: dict, meso_frac) -> None:
         """Set the timed status-pill text after a 辨識 pass, reflecting both the
@@ -1734,6 +1844,11 @@ class OverlayApp:
         self._detect_result_text = self._t("record_sale_done", n=f"{booked:,}")
         self._detect_result_ok = True
         self._detect_result_until = time.time() + 3.0
+        # Commit the session to History right away (per user request
+        # 2026-08-27) -- the record shows up on the History tab immediately
+        # instead of waiting for the next Start.
+        self._commit_pending_session()
+        self._apply_run_state()  # hides the 記錄賣裝 button once committed
         self._render(self._last)
 
     def _apply_run_state(self) -> None:
@@ -2024,23 +2139,12 @@ class OverlayApp:
         ).pack(side="right", padx=(0, 4))
 
         dur_min = summary.duration_s / 60
-        # Mixes translated chrome ("restarted early"/提前重啟) with the
-        # duration number when applicable, so this needs the language-aware
-        # font -- the plain "10.0m" case doesn't strictly need it, but the
-        # widget is rebuilt wholesale on language switch anyway either way.
+        # Duration shown as-is (e.g. "4.6分") -- the old early-restart
+        # annotation ("5.5分 / 5分，提前重啟") was removed per user request
+        # (2026-08-27): the session's own start→end time is the point, and
+        # the target interval is already visible on the timestamp line.
         unit = self._t("unit_min_short")
-        if summary.interval_minutes is not None and abs(dur_min - summary.interval_minutes) > 0.05:
-            dur_text = self._t(
-                "history_duration_early",
-                dur=f"{dur_min:.1f}",
-                target=summary.interval_minutes,
-                unit=unit,
-                label=self._t("history_restarted_early"),
-            )
-            dur_color = EXP_COLOR
-            dur_font = self._font(11)
-        else:
-            dur_text, dur_color, dur_font = f"{dur_min:.1f}{unit}", INK_DIM, _FONT_MONO_SM
+        dur_text, dur_color, dur_font = f"{dur_min:.1f}{unit}", INK_DIM, _FONT_MONO_SM
         ctk.CTkLabel(head, text=dur_text, font=dur_font, text_color=dur_color).pack(side="right")
 
         timestamp = ctk.CTkFrame(card, fg_color="transparent")
@@ -2056,25 +2160,18 @@ class OverlayApp:
         start_s = f"{summary.start_exp:,}" if summary.start_exp is not None else "?"
         end_s = f"{summary.end_exp:,}" if summary.end_exp is not None else "?"
         diff = summary.exp_diff
-        diff_s = f"+{diff:,}" if diff is not None else "?"
         pct_diff = summary.exp_pct_diff
-        # Two rows instead of one long left-packed run: the old single line
-        # (start → end +diff (+pct%) epm/min, six labels side by side) overflows
-        # a narrow window and Tk squeezes it into a one-char-wide vertical
-        # column -- the reported "快速拉動" breakage. A grid with the headline
-        # diff pinned right and the extras on their own muted row wraps cleanly.
+        # One row instead of two: the old right-aligned yellow diff (+10,427)
+        # duplicated the EXP cell in the 2x2 grid below, so it was removed per
+        # user request (2026-08-27). The range (start → end) is the headline,
+        # with the percentage/rate on the muted extras line underneath.
         range_row = ctk.CTkFrame(rng, fg_color="transparent")
         range_row.pack(fill="x")
-        range_row.grid_columnconfigure(0, weight=1)
-        range_row.grid_columnconfigure(1, weight=0)
         ctk.CTkLabel(
             range_row, text=f"{start_s} → {end_s}", font=_FONT_MONO, text_color=INK, anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
-            range_row, text=diff_s, font=_FONT_MONO, text_color=EXP_COLOR, anchor="e",
-        ).grid(row=0, column=1, sticky="e")
-        # Efficiency + percentage: muted, on their own row. The headline number
-        # stays the diff above.
+        ).pack(side="left")
+        # Efficiency + percentage: muted, on their own row. The headline
+        # number stays the diff above.
         extras: list[str] = []
         if pct_diff is not None:
             extras.append(f"+{pct_diff:.2f}%")
@@ -2090,7 +2187,7 @@ class OverlayApp:
         mini.pack(fill="x", padx=12, pady=(0, 10))
         mini.grid_columnconfigure((0, 1), weight=1, uniform="mini")
 
-        def mini_stat(row: int, col: int, label: str, value: str, color: str) -> None:
+        def mini_stat(row: int, col: int, label: str, value: str, color: str, sub: str | None = None, sub_color: str = INK_DIM) -> None:
             box = ctk.CTkFrame(mini, fg_color=SURFACE_2, corner_radius=7)
             box.grid(
                 row=row, column=col, sticky="ew",
@@ -2102,6 +2199,10 @@ class OverlayApp:
             ctk.CTkLabel(box, text=value, font=_FONT_MONO_SM, text_color=color, anchor="w").pack(
                 fill="x", padx=8, pady=(0, 6)
             )
+            if sub is not None:
+                ctk.CTkLabel(box, text=sub, font=_FONT_MONO_SM, text_color=sub_color, anchor="w").pack(
+                    fill="x", padx=8, pady=(0, 6)
+                )
 
         # 2x2 grid (per user request 2026-08-24): EXP top-left, meso top-right,
         # HP loss bottom-left, MP loss bottom-right.
@@ -2111,18 +2212,18 @@ class OverlayApp:
             exp_c = EXP_COLOR if summary.exp_diff >= 0 else HP_COLOR
         mini_stat(0, 0, self._t("history_exp"), exp_s, exp_c)
 
-        meso_s, meso_c = "--", INK_FAINT
-        # Show the session's true meso total: live drops + equipment-sale
-        # revenue (recorded after the session stopped).
-        total_meso = None
+        # Meso cell splits into WILD (in-session drops) + EQUIP (equipment
+        # sold afterwards) per user request (2026-08-27) -- the old single
+        # total hid how much came from each source. Wild is the headline;
+        # the equipment line only appears when a sale was recorded.
+        wild_s, wild_c = "--", INK_FAINT
         if summary.meso_gained is not None:
-            total_meso = summary.meso_gained + (summary.sale_meso or 0)
-        elif summary.sale_meso:
-            total_meso = summary.sale_meso
-        if total_meso is not None:
-            meso_s = f"{total_meso:+,}"
-            meso_c = EXP_COLOR if total_meso >= 0 else HP_COLOR
-        mini_stat(0, 1, self._t("history_meso"), meso_s, meso_c)
+            wild_s = self._t("history_meso_wild", n=f"{summary.meso_gained:+,}")
+            wild_c = EXP_COLOR if summary.meso_gained >= 0 else HP_COLOR
+        equip_sub = None
+        if summary.sale_meso:
+            equip_sub = self._t("history_meso_equip", n=f"{summary.sale_meso:+,}")
+        mini_stat(0, 1, self._t("history_meso"), wild_s, wild_c, sub=equip_sub)
 
         mini_stat(1, 0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
         mini_stat(1, 1, self._t("history_mp_loss"), _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
