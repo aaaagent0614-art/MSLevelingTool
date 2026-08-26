@@ -187,6 +187,8 @@ class _StubApp:
     _on_pause_button_clicked = OverlayApp._on_pause_button_clicked
     _apply_run_state = OverlayApp._apply_run_state
     _on_delete_history_clicked = OverlayApp._on_delete_history_clicked
+    _update_compare_card = OverlayApp._update_compare_card
+    _update_compact_compare_line = OverlayApp._update_compact_compare_line
 
 
 def _calibrate(app: _StubApp, gains=(100,)) -> None:

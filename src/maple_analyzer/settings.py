@@ -121,3 +121,8 @@ class Settings:
     # placement survives a restart. None until the window has been moved once.
     compact_x: int | None = None
     compact_y: int | None = None
+    # Comparison baseline (2026-08-26): start_time of the History session the
+    # user picked on the History tab to compare new sessions against. None
+    # while no baseline is selected. Start-time (not list index) is the key
+    # so deleting/renaming sessions never shifts the reference.
+    compare_start_time: float | None = None
