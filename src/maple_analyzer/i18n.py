@@ -54,6 +54,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "resume_button": {"en": "Resume", "zh": "繼續"},
     "stop_button": {"en": "Stop", "zh": "停止"},
     "start_button": {"en": "Start Session", "zh": "開始"},
+    "compact_restore": {"en": "Restore", "zh": "還原"},
 
     "history_empty": {"en": "No sessions yet", "zh": "尚無紀錄"},
     "history_session": {"en": "SESSION #{n}", "zh": "紀錄 #{n}"},

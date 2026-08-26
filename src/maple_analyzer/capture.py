@@ -462,6 +462,12 @@ class GameWindowCapture:
         try:
             capture = windows_capture.WindowsCapture(
                 cursor_capture=True, draw_border=False, window_hwnd=hwnd,
+                # Throttle the stream to ~2Hz (500ms), matching the tick rate.
+                # Without this, WGC fires a frame every render (~30-60fps) and
+                # each one triggers a full-frame numpy copy + PIL conversion,
+                # burning CPU/GPU that competes with the game -- the reported
+                # "game lags after opening" (2026-08-25).
+                minimum_update_interval=500,
             )
         except Exception:
             return
