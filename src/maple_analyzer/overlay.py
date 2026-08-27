@@ -755,14 +755,16 @@ class OverlayApp:
         self._i18n(self._compare_empty_label, "compare_no_sessions", size=11, bold=False)
         self._compare_empty_label.pack(fill="x", padx=12, pady=(12, 0))
 
-        pick_row = ctk.CTkFrame(parent, fg_color="transparent")
-        pick_row.pack(fill="x", padx=12, pady=(10, 6))
-
-        def add_picker(side, key, attr) -> None:
-            ctk.CTkLabel(pick_row, text=self._t(key), font=self._font(11, bold=True),
-                         text_color=INK_DIM, anchor="w").pack(side=side, padx=(0, 6))
+        # Two pickers stacked vertically (per user request 2026-08-28: side
+        # by side didn't fit the 320px-wide window) -- each row is a label
+        # plus its dropdown.
+        for key, attr in (("compare_pick_a", "_compare_menu_a"), ("compare_pick_b", "_compare_menu_b")):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=(0, 6))
+            ctk.CTkLabel(row, text=self._t(key), font=self._font(11, bold=True),
+                         text_color=INK_DIM, anchor="w").pack(side="left", padx=(0, 8))
             menu = ctk.CTkOptionMenu(
-                pick_row, values=[self._t("compare_placeholder")],
+                row, values=[self._t("compare_placeholder")],
                 command=lambda _v, a=attr: self._on_compare_select(),
                 fg_color=SURFACE_2, button_color=SURFACE_2, button_hover_color=TRACK_BG,
                 text_color=INK, font=self._font(10, bold=False),
@@ -770,11 +772,8 @@ class OverlayApp:
                 dropdown_text_color=INK, dropdown_font=self._font(10, bold=False),
             )
             menu.set(self._t("compare_placeholder"))
-            menu.pack(side=side, padx=(0, 12), fill="x", expand=True)
+            menu.pack(side="left", fill="x", expand=True)
             setattr(self, attr, menu)
-
-        add_picker("left", "compare_pick_a", "_compare_menu_a")
-        add_picker("right", "compare_pick_b", "_compare_menu_b")
         self._compare_sel_a: SessionSummary | None = None
         self._compare_sel_b: SessionSummary | None = None
 
