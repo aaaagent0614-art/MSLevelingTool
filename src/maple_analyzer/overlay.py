@@ -320,6 +320,7 @@ class OverlayApp:
         self._compact_win = None
         self._compact_labels: dict[str, ctk.CTkLabel] = {}
         self._compact_eta = None  # set inside _ensure_compact_win's add_cell
+        self._compact_meso_sub = None  # meso cell's third line (net income)
         # Manual stat overrides (2026-08-27): values the player typed over an
         # OCR misread on the Dashboard (see _on_stat_edit). Folded into the
         # merged snapshot every tick (see _apply_manual_overrides) until
@@ -634,6 +635,10 @@ class OverlayApp:
         add_kv_row(loss_card, 3, "mesocurrent", "kv_meso_current")
         add_kv_row(loss_card, 4, "mesosale", "kv_meso_sale")
         add_kv_row(loss_card, 5, "mesototal", "kv_meso_total")
+        # Potion cost + net income (2026-08-28): shown only when potion
+        # settings are configured (see _potion_cost / _apply_visibility).
+        add_kv_row(loss_card, 6, "potioncost", "kv_potion_cost")
+        add_kv_row(loss_card, 7, "netmeso", "kv_net_meso")
         # Faint hint under the meso rows: the counter only exists while the
         # inventory is open.
         self._meso_hint_label = ctk.CTkLabel(
@@ -641,7 +646,7 @@ class OverlayApp:
             text_color=INK_FAINT, font=self._font(9, bold=False),
         )
         self._i18n(self._meso_hint_label, "meso_hint", size=9, bold=False)
-        self._meso_hint_label.grid(row=6, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 4))
+        self._meso_hint_label.grid(row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 4))
 
         # 記錄賣裝 button + hint: shown only while a session is stopped-but-
         # pending (see _apply_run_state). Records the meso from selling the
@@ -652,7 +657,7 @@ class OverlayApp:
             corner_radius=9, height=28,
         )
         self._i18n(self._record_sale_button, "record_sale_button", size=12, bold=True)
-        self._record_sale_button.grid(row=7, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 0))
+        self._record_sale_button.grid(row=9, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 0))
         self._record_sale_button.grid_remove()
 
         self._record_sale_hint = ctk.CTkLabel(
@@ -660,7 +665,7 @@ class OverlayApp:
             text_color=INK_FAINT, font=self._font(9, bold=False),
         )
         self._i18n(self._record_sale_hint, "record_sale_hint", size=9, bold=False)
-        self._record_sale_hint.grid(row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        self._record_sale_hint.grid(row=10, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
         self._record_sale_hint.grid_remove()
 
         # Three buttons share one row: the left cycles Pause/Resume/Start
@@ -1076,6 +1081,51 @@ class OverlayApp:
             "settings_track_meso_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
 
+        # POTION COST (2026-08-28): unit price + restore amount per potion.
+        # When set, the Dashboard shows 藥水成本 and 淨收益 (meso − potion).
+        potion_card = ctk.CTkFrame(scroll, fg_color=SURFACE, corner_radius=12)
+        potion_card.pack(fill="x", padx=2, pady=(4, 2))
+        self._i18n(
+            ctk.CTkLabel(potion_card, anchor="w", text_color=INK_DIM), "settings_potion", size=11, bold=True
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(5, 0))
+        self._i18n(
+            ctk.CTkLabel(potion_card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT),
+            "settings_potion_hint", size=9, bold=False,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 3))
+
+        self._potion_entries: dict[str, ctk.CTkEntry] = {}
+
+        def add_potion_entry(row: int, i18n_key: str, attr: str) -> None:
+            ctk.CTkLabel(potion_card, text=self._t(i18n_key), font=self._font(10, bold=False),
+                         text_color=INK, anchor="w").grid(row=row, column=0, sticky="w", padx=(12, 6), pady=1)
+            var = tk.StringVar(value=str(getattr(self._settings, attr) or 0))
+            entry = ctk.CTkEntry(
+                potion_card, textvariable=var, width=72, height=26,
+                fg_color=SURFACE_2, border_color=SURFACE_2, text_color=INK,
+                font=_FONT_MONO_SM, justify="right",
+            )
+            entry.grid(row=row, column=1, sticky="e", padx=(6, 12), pady=1)
+            self._potion_entries[attr] = entry
+
+            def on_change(_e=None, a=attr, v=var) -> None:
+                try:
+                    val = int(v.get().replace(",", ""))
+                except ValueError:
+                    val = 0
+                if getattr(self._settings, a) != val:
+                    setattr(self._settings, a, val)
+                    self._persist_settings()
+                    self._apply_visibility()
+                    self._render(self._last)
+
+            entry.bind("<KeyRelease>", on_change)
+
+        add_potion_entry(2, "settings_hp_potion_price", "hp_potion_price")
+        add_potion_entry(3, "settings_hp_potion_restore", "hp_potion_restore")
+        add_potion_entry(4, "settings_mp_potion_price", "mp_potion_price")
+        add_potion_entry(5, "settings_mp_potion_restore", "mp_potion_restore")
+        potion_card.grid_columnconfigure(0, weight=1)
+
         # MANUAL POSITION: mark the status bar and the meso counter with the
         # mouse so the HUD OCRs those exact screen regions -- what makes it
         # work under a screen magnifier (Magpie), where the game window's own
@@ -1317,6 +1367,8 @@ class OverlayApp:
             "projexp": s.show_proj_exp, "hploss": s.show_hp, "mploss": s.show_mp,
             "mesostart": s.track_meso, "mesocurrent": s.track_meso,
             "mesosale": s.track_meso, "mesototal": s.track_meso,
+            # Potion rows only make sense once the player configured prices.
+            "potioncost": self._potion_enabled(), "netmeso": self._potion_enabled(),
         }
         for key, (lbl, value) in self._kv_rows.items():
             for w in (lbl, value):
@@ -2124,6 +2176,8 @@ class OverlayApp:
             sub.grid(row=2, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
             if key == "exp":
                 self._compact_eta = sub
+            if key == "meso":
+                self._compact_meso_sub = sub
             return cell
 
         add_cell("compact_hp_loss", "hploss", 0, 0, HP_COLOR)
@@ -2216,6 +2270,18 @@ class OverlayApp:
             )
         else:
             self._compact_labels["meso"].configure(text="--", text_color=INK_FAINT)
+        # Meso cell's third line: net income (meso − potion cost) when the
+        # player configured potion prices (2026-08-28).
+        if getattr(self, "_compact_meso_sub", None) is not None:
+            cost = self._potion_cost()
+            if self._potion_enabled() and total is not None:
+                net = total - cost
+                self._compact_meso_sub.configure(
+                    text=self._t("compact_net", n=f"{net:+,}"),
+                    text_color=OK_COLOR if net >= 0 else HP_COLOR,
+                )
+            else:
+                self._compact_meso_sub.configure(text=" ", text_color=INK_DIM)
         exp_diff = self._session.exp_diff
         total_exp = snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
         if exp_diff is not None:
@@ -2602,6 +2668,30 @@ class OverlayApp:
 
     # ---- render --------------------------------------------------------
 
+    def _potion_enabled(self) -> bool:
+        """True when the player has configured potion prices (see the
+        Settings tab's 藥水成本 card). Both price and restore must be >0 for
+        a stat's cost to count."""
+        s = self._settings
+        return (s.hp_potion_restore > 0 and s.hp_potion_price > 0) or (
+            s.mp_potion_restore > 0 and s.mp_potion_price > 0
+        )
+
+    def _potion_cost(self) -> int:
+        """Session potion spend: for each stat, bottles needed =
+        ceil(loss / restore) times the unit price. Uses integer ceil so a
+        partial bottle counts as a full one."""
+        s = self._settings
+        cost = 0
+        hp_loss, mp_loss = self._session.hp_loss, self._session.mp_loss
+        if s.hp_potion_restore > 0 and hp_loss > 0:
+            bottles = (hp_loss + s.hp_potion_restore - 1) // s.hp_potion_restore
+            cost += bottles * s.hp_potion_price
+        if s.mp_potion_restore > 0 and mp_loss > 0:
+            bottles = (mp_loss + s.mp_potion_restore - 1) // s.mp_potion_restore
+            cost += bottles * s.mp_potion_price
+        return cost
+
     def _levelup_eta_s(self, snap: StatSnapshot) -> float | None:
         """Seconds until level-up at the current session EXP rate. None until
         a few seconds of positive gain make the rate stable (extrapolating off
@@ -2751,6 +2841,23 @@ class OverlayApp:
             )
         else:
             self._value_labels["mesototal"].configure(text="--", text_color=INK)
+
+        # Potion cost + net income (2026-08-28): visible only when the
+        # player configured potion prices on the Settings tab.
+        cost = self._potion_cost()
+        if self._potion_enabled():
+            self._value_labels["potioncost"].configure(
+                text=f"-{cost:,}" if cost > 0 else "0",
+                text_color=HP_COLOR if cost > 0 else INK_FAINT,
+            )
+            if total is not None:
+                net = total - cost
+                self._value_labels["netmeso"].configure(
+                    text=f"{net:+,}",
+                    text_color=OK_COLOR if net >= 0 else HP_COLOR,
+                )
+            else:
+                self._value_labels["netmeso"].configure(text="--", text_color=INK)
 
         # Pause/stop/calibration are user- or engine-driven states that take
         # priority over the activity-based idle/tracking read below -- e.g. a

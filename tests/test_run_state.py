@@ -194,6 +194,8 @@ class _StubApp:
     _on_delete_history_clicked = OverlayApp._on_delete_history_clicked
     _apply_manual_overrides = OverlayApp._apply_manual_overrides
     _read_detected_values = OverlayApp._read_detected_values
+    _potion_enabled = OverlayApp._potion_enabled
+    _potion_cost = OverlayApp._potion_cost
 
 
 def _calibrate(app: _StubApp, gains=(100,)) -> None:

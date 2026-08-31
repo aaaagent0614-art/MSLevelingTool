@@ -137,6 +137,16 @@ _STRINGS: dict[str, dict[Lang, str]] = {
         "en": "Open the inventory (I) once right after Start and once before the session ends; the meso counter is read both times.",
         "zh": "開始記錄後與結束前，各開一次道具欄（I），程式會讀取楓幣數字。",
     },
+    "settings_potion": {"en": "POTION COST", "zh": "藥水成本（淨收益計算）"},
+    "settings_potion_hint": {
+        "en": "Enter the price and restore amount of the HP/MP potions you use; the Dashboard then shows 藥水成本 and 淨收益 (meso − potion cost). Leave 0 to turn this off.",
+        "zh": "輸入你喝的 HP／MP 藥水單價與每瓶恢復量，儀表板就會顯示「藥水成本」與「淨收益」（楓幣收入 − 藥水錢）。留 0 關閉。",
+    },
+    "settings_hp_potion_price": {"en": "HP potion price", "zh": "HP 藥水單價"},
+    "settings_hp_potion_restore": {"en": "HP per potion", "zh": "每瓶恢復 HP"},
+    "settings_mp_potion_price": {"en": "MP potion price", "zh": "MP 藥水單價"},
+    "settings_mp_potion_restore": {"en": "MP per potion", "zh": "每瓶恢復 MP"},
+    "compact_net": {"en": "Net {n}", "zh": "淨 {n}"},
     "settings_manual": {"en": "MANUAL POSITION", "zh": "手動設定位置"},
     "settings_use_manual": {
         "en": "Use manually marked positions", "zh": "使用手動標記的位置",
@@ -209,6 +219,8 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     # the session whose drops are being sold).
     "kv_meso_sale": {"en": "Sale revenue", "zh": "賣裝收益"},
     "kv_meso_total": {"en": "Total meso", "zh": "總收益"},
+    "kv_potion_cost": {"en": "Potion cost", "zh": "藥水成本"},
+    "kv_net_meso": {"en": "Net meso", "zh": "淨收益"},
     "record_sale_button": {"en": "Record Sale", "zh": "記錄賣裝"},
     "record_sale_hint": {
         "en": "After selling, open the inventory (I) and press this.",

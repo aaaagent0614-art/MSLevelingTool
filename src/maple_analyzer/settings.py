@@ -129,3 +129,11 @@ class Settings:
     # fourth tab with two dropdowns (see _build_compare_tab); this field is
     # kept only so old settings files still load.
     compare_start_time: float | None = None
+    # Potion cost (2026-08-28, inspired by the Bahamut exp calculator):
+    # unit price and restore amount per potion for HP and MP. When both are
+    # set (>0), the Dashboard shows 藥水成本 (ceil(loss/restore)*price for
+    # each stat) and 淨收益 (meso income minus potion cost). 0 = feature off.
+    hp_potion_price: int = 0
+    hp_potion_restore: int = 0
+    mp_potion_price: int = 0
+    mp_potion_restore: int = 0
