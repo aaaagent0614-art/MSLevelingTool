@@ -34,7 +34,7 @@ def settings_path() -> Path:
 
 # The only non-JSON-native fields are the (l, t, r, b) screen-region tuples,
 # which are stored as lists.
-_REGION_FIELDS = ("manual_stat_region", "manual_meso_region")
+_REGION_FIELDS = ("manual_stat_region", "manual_meso_region", "manual_quick_bar_region")
 
 
 def save_settings(s: "Settings") -> None:
@@ -137,3 +137,12 @@ class Settings:
     hp_potion_restore: int = 0
     mp_potion_price: int = 0
     mp_potion_restore: int = 0
+    # Quick-slot potion tracking (2026-09-02): the player marks the quickbar
+    # row on screen and picks which slot (1-12) holds their potion; the count
+    # there is OCR'd periodically so the session knows the real bottles
+    # consumed (start count − end count), which beats the HP/MP-loss estimate
+    # when the potion is visible in the quickbar. quick_slot_index 0 = off;
+    # quick_slot_kind "hp"/"mp" picks which unit price applies.
+    quick_slot_index: int = 0
+    quick_slot_kind: str = "hp"
+    manual_quick_bar_region: tuple[int, int, int, int] | None = None  # whole quickbar row (l, t, r, b)

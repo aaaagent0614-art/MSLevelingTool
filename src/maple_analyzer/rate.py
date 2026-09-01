@@ -384,6 +384,10 @@ class Session:
         # sale reading). Reset by start().
         self._sale_revenue = 0
         self._last_sale_meso: int | None = None
+        # Quick-slot potion counter (2026-09-02) -- same first=baseline /
+        # last=end shape as meso (see record_quick_slot). Reset by start().
+        self._quick_slot_start: int | None = None
+        self._quick_slot_end: int | None = None
 
     def start(self, now: float | None = None) -> None:
         """Begin a new session. Carries forward whatever EXP/HP/MP values are
@@ -413,6 +417,11 @@ class Session:
         self._end_meso = None
         self._sale_revenue = 0
         self._last_sale_meso = None
+        # Quick-slot potion counter (2026-09-02): first reading after start is
+        # the baseline, every later reading updates the end value, so the last
+        # reading before finalize is the end point (same shape as meso).
+        self._quick_slot_start = None
+        self._quick_slot_end = None
 
     # ---- pause/resume -------------------------------------------------
 
@@ -740,6 +749,34 @@ class Session:
             self._end_meso = None
         else:
             self._end_meso = meso
+
+    def record_quick_slot(self, count: int) -> None:
+        """Feed one quick-slot potion count into the session (2026-09-02).
+
+        Same shape as record_meso: the first reading after start becomes the
+        baseline, every later reading keeps updating the end value, so the
+        last reading before finalize is the end point. The difference is the
+        real bottles consumed -- more accurate than the HP/MP-loss estimate
+        when the potion sits in a visible quickbar slot.
+
+        No-op while paused or before the session has actually started."""
+        if self._paused or self._start_time is None:
+            return
+        if self._quick_slot_start is None:
+            self._quick_slot_start = count
+            self._quick_slot_end = None
+        else:
+            self._quick_slot_end = count
+
+    @property
+    def quick_slot_consumed(self) -> int | None:
+        """Bottles consumed per the quickbar counter: start − end, clamped at
+        0. None until both endpoints have been read. A refill mid-session
+        makes end >= start; the unseen refill means the true consumption is
+        under-reported, which is the honest reading."""
+        if self._quick_slot_start is None or self._quick_slot_end is None:
+            return None
+        return max(0, self._quick_slot_start - self._quick_slot_end)
 
     @property
     def start_meso(self) -> int | None:

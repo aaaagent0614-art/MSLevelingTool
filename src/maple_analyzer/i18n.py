@@ -147,6 +147,24 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "settings_mp_potion_price": {"en": "MP potion price", "zh": "MP 藥水單價"},
     "settings_mp_potion_restore": {"en": "MP per potion", "zh": "每瓶恢復 MP"},
     "compact_net": {"en": "Net {n}", "zh": "淨 {n}"},
+    # Quick-slot potion tracking (2026-09-02).
+    "settings_quick_slot": {"en": "QUICK-SLOT POTION", "zh": "快捷鍵藥水（精準偵測）"},
+    "settings_quick_slot_hint": {
+        "en": "Mark your quickbar row, pick which slot holds the potion, then the app reads the count at session start/end to get the real bottles consumed. When the slot number is squeezed (UI too narrow), the reading may be partial — treat the consumed count as approximate.",
+        "zh": "框選快捷鍵欄、選藥水在第幾格，程式會在開始／結束時讀取該格數量，算出實際消耗瓶數。若格內數字因 UI 太窄顯示不全，讀數會不準，請當作約略值。",
+    },
+    "settings_quick_slot_index": {"en": "Potion slot", "zh": "藥水在第幾格"},
+    "settings_quick_slot_off": {"en": "Off (use HP/MP loss estimate)", "zh": "關閉（用 HP/MP 損失估算）"},
+    "settings_quick_slot_kind": {"en": "Potion type", "zh": "藥水種類"},
+    "settings_set_quick_bar": {"en": "Mark quickbar position", "zh": "標記快捷鍵欄位置"},
+    "settings_quick_bar_set": {"en": "Quickbar: set", "zh": "快捷鍵欄：已設定"},
+    "settings_quick_bar_unset": {"en": "Quickbar: not set", "zh": "快捷鍵欄：未設定"},
+    "settings_quick_bar_missing_prompt": {
+        "en": "Please mark the quickbar position first.",
+        "zh": "請先標記快捷鍵欄位置。",
+    },
+    "kv_quick_slot": {"en": "Quick-slot potions", "zh": "快捷鍵藥水"},
+    "quick_slot_consumed": {"en": "{n} bottles", "zh": "消耗 {n} 瓶"},
     "settings_manual": {"en": "MANUAL POSITION", "zh": "手動設定位置"},
     "settings_use_manual": {
         "en": "Use manually marked positions", "zh": "使用手動標記的位置",

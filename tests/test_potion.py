@@ -56,3 +56,67 @@ def test_mp_only_configuration():
     app._settings.mp_potion_restore = 100
     assert app._potion_enabled() is True
     assert app._potion_cost() == 1 * 500  # HP potion not configured -> ignored
+
+
+# ---- quick-slot potion counter (2026-09-02) -------------------------------
+
+
+def _running_app() -> _StubApp:
+    app = _StubApp()
+    app._session._calibrated = True
+    app._session.start()
+    return app
+
+
+def test_quick_slot_consumed_needs_both_endpoints():
+    s = _running_app()._session
+    assert s.quick_slot_consumed is None
+    s.record_quick_slot(50)
+    assert s.quick_slot_consumed is None  # baseline only, no end yet
+    s.record_quick_slot(42)
+    assert s.quick_slot_consumed == 8
+
+
+def test_quick_slot_consumed_clamps_refill():
+    s = _running_app()._session
+    s.record_quick_slot(50)
+    s.record_quick_slot(60)  # refilled mid-session -> end > start
+    assert s.quick_slot_consumed == 0  # unseen refill, honest 0
+
+
+def test_quick_slot_noop_before_start():
+    app = _StubApp()  # session never started
+    app._session.record_quick_slot(50)
+    assert app._session.quick_slot_consumed is None
+
+
+def test_potion_cost_prefers_quick_slot_path():
+    app = _running_app()
+    app._settings.quick_slot_index = 3
+    app._settings.manual_quick_bar_region = (100, 100, 700, 140)
+    app._settings.quick_slot_kind = "hp"
+    app._settings.hp_potion_price = 320
+    app._session.record_quick_slot(50)
+    app._session.record_quick_slot(42)  # 8 bottles
+    assert app._potion_cost() == 8 * 320
+    # MP kind uses the MP price instead.
+    app._settings.quick_slot_kind = "mp"
+    app._settings.mp_potion_price = 200
+    assert app._potion_cost() == 8 * 200
+
+
+def test_potion_cost_falls_back_to_loss_estimate_without_reads():
+    app = _running_app()
+    app._settings.quick_slot_index = 3
+    app._settings.manual_quick_bar_region = (100, 100, 700, 140)
+    app._settings.hp_potion_price = 100
+    app._settings.hp_potion_restore = 300
+    app._session._hp.loss = 1000
+    assert app._potion_cost() == 4 * 100  # quick-slot has no readings yet
+
+
+def test_read_quick_slot_count_off_when_unconfigured():
+    app = _StubApp()
+    assert app._read_quick_slot_count() is None
+    app._settings.quick_slot_index = 1  # no marked region yet
+    assert app._read_quick_slot_count() is None

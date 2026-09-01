@@ -196,6 +196,8 @@ class _StubApp:
     _read_detected_values = OverlayApp._read_detected_values
     _potion_enabled = OverlayApp._potion_enabled
     _potion_cost = OverlayApp._potion_cost
+    _maybe_scan_quick_slot = OverlayApp._maybe_scan_quick_slot
+    _read_quick_slot_count = OverlayApp._read_quick_slot_count
 
 
 def _calibrate(app: _StubApp, gains=(100,)) -> None:
