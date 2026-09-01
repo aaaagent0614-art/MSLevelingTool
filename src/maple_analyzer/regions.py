@@ -33,6 +33,14 @@ FIELD_BOXES = {
     "EXP": (712, 767, 858, 787),
 }
 
+# The quickbar (8 slots, two rows of four) sits in the bottom-right of the
+# client area, separate from the bottom-centre stat panel. These fractions
+# are the whole quickbar row (key labels + potion counts), measured off
+# samples/maple_story_ui.jpg (x≈933-1063 of 1351, y≈666-711 of 800) and the
+# 1920x1077 sample. Used as the auto-detect position when the user hasn't
+# marked the quickbar manually (see Settings.manual_quick_bar_region).
+QUICK_BAR_FRAC = (0.685, 0.815, 0.795, 0.905)  # (left, top, right, bottom) as fractions
+
 
 @dataclass(frozen=True)
 class Box:

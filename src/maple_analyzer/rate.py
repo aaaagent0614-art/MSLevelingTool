@@ -385,9 +385,11 @@ class Session:
         self._sale_revenue = 0
         self._last_sale_meso: int | None = None
         # Quick-slot potion counter (2026-09-02) -- same first=baseline /
-        # last=end shape as meso (see record_quick_slot). Reset by start().
-        self._quick_slot_start: int | None = None
-        self._quick_slot_end: int | None = None
+        # last=end shape as meso (see record_potion). Reset by start().
+        self._hp_slot_start: int | None = None
+        self._hp_slot_end: int | None = None
+        self._mp_slot_start: int | None = None
+        self._mp_slot_end: int | None = None
 
     def start(self, now: float | None = None) -> None:
         """Begin a new session. Carries forward whatever EXP/HP/MP values are
@@ -420,8 +422,10 @@ class Session:
         # Quick-slot potion counter (2026-09-02): first reading after start is
         # the baseline, every later reading updates the end value, so the last
         # reading before finalize is the end point (same shape as meso).
-        self._quick_slot_start = None
-        self._quick_slot_end = None
+        self._hp_slot_start = None
+        self._hp_slot_end = None
+        self._mp_slot_start = None
+        self._mp_slot_end = None
 
     # ---- pause/resume -------------------------------------------------
 
@@ -750,8 +754,9 @@ class Session:
         else:
             self._end_meso = meso
 
-    def record_quick_slot(self, count: int) -> None:
-        """Feed one quick-slot potion count into the session (2026-09-02).
+    def record_potion(self, kind: str, count: int) -> None:
+        """Feed one quick-slot potion count into the session (2026-09-02,
+        reworked 2026-09-03). `kind` is "hp" or "mp".
 
         Same shape as record_meso: the first reading after start becomes the
         baseline, every later reading keeps updating the end value, so the
@@ -762,21 +767,46 @@ class Session:
         No-op while paused or before the session has actually started."""
         if self._paused or self._start_time is None:
             return
-        if self._quick_slot_start is None:
-            self._quick_slot_start = count
-            self._quick_slot_end = None
+        if kind == "hp":
+            if self._hp_slot_start is None:
+                self._hp_slot_start = count
+                self._hp_slot_end = None
+            else:
+                self._hp_slot_end = count
         else:
-            self._quick_slot_end = count
+            if self._mp_slot_start is None:
+                self._mp_slot_start = count
+                self._mp_slot_end = None
+            else:
+                self._mp_slot_end = count
 
     @property
-    def quick_slot_consumed(self) -> int | None:
-        """Bottles consumed per the quickbar counter: start − end, clamped at
-        0. None until both endpoints have been read. A refill mid-session
-        makes end >= start; the unseen refill means the true consumption is
+    def hp_potion_consumed(self) -> int | None:
+        """HP bottles consumed per the quickbar counter: start − end, clamped
+        at 0. None until both endpoints read. A refill mid-session makes end
+        >= start; the unseen refill means the true consumption is
         under-reported, which is the honest reading."""
-        if self._quick_slot_start is None or self._quick_slot_end is None:
+        if self._hp_slot_start is None or self._hp_slot_end is None:
             return None
-        return max(0, self._quick_slot_start - self._quick_slot_end)
+        return max(0, self._hp_slot_start - self._hp_slot_end)
+
+    @property
+    def mp_potion_consumed(self) -> int | None:
+        """MP bottles consumed per the quickbar counter (see
+        hp_potion_consumed)."""
+        if self._mp_slot_start is None or self._mp_slot_end is None:
+            return None
+        return max(0, self._mp_slot_start - self._mp_slot_end)
+
+    @property
+    def hp_slot_count(self) -> int | None:
+        """Latest HP-slot count read (the running end value)."""
+        return self._hp_slot_end
+
+    @property
+    def mp_slot_count(self) -> int | None:
+        """Latest MP-slot count read (the running end value)."""
+        return self._mp_slot_end
 
     @property
     def start_meso(self) -> int | None:

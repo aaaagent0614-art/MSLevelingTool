@@ -55,6 +55,7 @@ from .i18n import Lang, t
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, find_meso_candidate, find_meso_from_boxes, find_meso_in_region, find_stat_fields, parse_fields, parse_meso
 from .rate import Session, SessionSummary
+from .regions import QUICK_BAR_FRAC
 from .region_selector import RegionSelector
 from .settings import Settings, app_data_dir, load_settings, save_settings
 
@@ -139,6 +140,12 @@ MESO_SCAN_INTERVAL_TICKS = 10
 # Same cadence for the quick-slot potion counter (2026-09-02): recognition-
 # only OCR on the marked slot, throttled so a session reads ~every 5s.
 QUICK_SLOT_SCAN_INTERVAL_TICKS = 10
+
+# The quickbar is 8 slots laid out as two rows of four (2026-09-03), each
+# keyed by a keyboard key. Slot 1-4 are the top row (left→right), 5-8 the
+# bottom row. Names are shown as-is -- they're the game's own key labels.
+QUICK_SLOT_NAMES = ["Shift", "Ins", "Home", "PgUp", "Ctrl", "Del", "End", "PgDn"]
+QUICK_SLOT_COUNT = 8
 
 # Number of history sessions at which the History tab starts nudging the user
 # to clean up old records (see _update_history_summary).
@@ -279,6 +286,10 @@ class OverlayApp:
         # committed when the next one starts (or on app close).
         self._session_pending = False
         self._sale_recorded = False
+        # Set once the sale is recorded for the current session and cleared on
+        # the next Start -- drives the 賣裝收益/淨收益 rows (only shown after
+        # the sale is recorded, since net income is wrong before it, 2026-09-03).
+        self._sale_done = False
         # Last capture failure message, so _do_tick can log state changes
         # instead of repeating the same line every 2s retry.
         self._last_capture_error: str | None = None
@@ -334,6 +345,10 @@ class OverlayApp:
         # before a session has started (see _render). Updated by the locator
         # and the manual meso scan regardless of run_state.
         self._last_meso: int | None = None
+        # Same idea for the quick-slot potion counts (2026-09-03): the 辨識
+        # pass reads them so the potion rows show a value before Start.
+        self._last_hp_slot_count: int | None = None
+        self._last_mp_slot_count: int | None = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -497,16 +512,14 @@ class OverlayApp:
         # Compare tab's dropdown labels carry translated chrome (紀錄 #n) and
         # the placeholder -- rebuild them so they match the new language.
         self._refresh_compare_tab()
-        # Quick-slot picker's 關閉 label is translated too.
-        if hasattr(self, "_quick_slot_menu"):
-            self._quick_slot_menu.configure(
-                values=[self._t("settings_quick_slot_off")] + [str(i) for i in range(1, 13)]
-            )
-            self._quick_slot_menu.set(
-                str(self._settings.quick_slot_index)
-                if self._settings.quick_slot_index
-                else self._t("settings_quick_slot_off")
-            )
+        # Quick-slot pickers' 關閉 label is translated too.
+        if hasattr(self, "_quick_menu_hp_quick_slot_index"):
+            values = [self._t("settings_quick_slot_off")] + list(QUICK_SLOT_NAMES)
+            for attr in ("hp_quick_slot_index", "mp_quick_slot_index"):
+                menu = getattr(self, "_quick_menu_" + attr)
+                menu.configure(values=values)
+                idx = getattr(self._settings, attr)
+                menu.set(self._t("settings_quick_slot_off") if not idx else QUICK_SLOT_NAMES[idx - 1])
             self._refresh_quick_bar_status()
 
         self._render(self._last)  # refreshes status pill / timer text immediately
@@ -635,54 +648,56 @@ class OverlayApp:
         self._map_value_label.grid(row=4, column=1, sticky="e", padx=(6, 12), pady=0)
         self._map_value_label.bind("<Button-1>", lambda _e: self._on_map_edit())
 
-        loss_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
-        loss_card.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 6))
-        loss_card.grid_columnconfigure(0, weight=1)
-        loss_card.grid_columnconfigure(1, weight=0)
-        add_kv_row(loss_card, 0, "hploss", "kv_hp_loss")
-        add_kv_row(loss_card, 1, "mploss", "kv_mp_loss")
-        # Meso rows always exist; they show '--' until track_meso is on AND
-        # the corresponding inventory readings have landed (see
-        # Session.record_meso). 賣裝收益/總收益 only make sense with meso
-        # tracking too, so they're gated the same way.
-        add_kv_row(loss_card, 2, "mesostart", "kv_meso_start")
-        add_kv_row(loss_card, 3, "mesocurrent", "kv_meso_current")
-        add_kv_row(loss_card, 4, "mesosale", "kv_meso_sale")
-        add_kv_row(loss_card, 5, "mesototal", "kv_meso_total")
-        # Quick-slot potion count (2026-09-02): real bottles consumed, shown
-        # when the player configured a quickbar slot.
-        add_kv_row(loss_card, 6, "quickslot", "kv_quick_slot")
-        # Potion cost + net income (2026-08-28): shown only when potion
-        # settings are configured (see _potion_cost / _apply_visibility).
-        add_kv_row(loss_card, 7, "potioncost", "kv_potion_cost")
-        add_kv_row(loss_card, 8, "netmeso", "kv_net_meso")
+        # Potion card (third block, 2026-09-03): HP/MP potion slot (which
+        # quickbar key) + the live potion count read from each slot. Replaces
+        # the old HP/MP-loss rows -- the quickbar counter is more accurate.
+        potion_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
+        potion_card.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 6))
+        potion_card.grid_columnconfigure(0, weight=1)
+        potion_card.grid_columnconfigure(1, weight=0)
+        add_kv_row(potion_card, 0, "hpslot", "kv_hp_potion_slot")
+        add_kv_row(potion_card, 1, "mpslot", "kv_mp_potion_slot")
+        add_kv_row(potion_card, 2, "hpcount", "kv_hp_potion_count")
+        add_kv_row(potion_card, 3, "mpcount", "kv_mp_potion_count")
+
+        # Meso card (fourth block, 2026-09-03): start/current meso, potion
+        # cost, and (only after 記錄賣裝) sale revenue + net income.
+        meso_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
+        meso_card.grid(row=4, column=0, sticky="ew", padx=2, pady=(0, 6))
+        meso_card.grid_columnconfigure(0, weight=1)
+        meso_card.grid_columnconfigure(1, weight=0)
+        add_kv_row(meso_card, 0, "mesostart", "kv_meso_start")
+        add_kv_row(meso_card, 1, "mesocurrent", "kv_meso_current")
+        add_kv_row(meso_card, 2, "potioncost", "kv_potion_cost")
+        add_kv_row(meso_card, 3, "mesosale", "kv_meso_sale")
+        add_kv_row(meso_card, 4, "netmeso", "kv_net_meso")
         # Faint hint under the meso rows: the counter only exists while the
         # inventory is open.
         self._meso_hint_label = ctk.CTkLabel(
-            loss_card, text="", anchor="w", justify="left",
+            meso_card, text="", anchor="w", justify="left",
             text_color=INK_FAINT, font=self._font(9, bold=False),
         )
         self._i18n(self._meso_hint_label, "meso_hint", size=9, bold=False)
-        self._meso_hint_label.grid(row=9, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 4))
+        self._meso_hint_label.grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 4))
 
         # 記錄賣裝 button + hint: shown only while a session is stopped-but-
         # pending (see _apply_run_state). Records the meso from selling the
         # session's equipment drops against this session.
         self._record_sale_button = ctk.CTkButton(
-            loss_card, command=self._on_record_sale_clicked,
+            meso_card, command=self._on_record_sale_clicked,
             fg_color=ACCENT, text_color=ACCENT_INK, hover_color="#7ff2e0",
             corner_radius=9, height=28,
         )
         self._i18n(self._record_sale_button, "record_sale_button", size=12, bold=True)
-        self._record_sale_button.grid(row=10, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 0))
+        self._record_sale_button.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 0))
         self._record_sale_button.grid_remove()
 
         self._record_sale_hint = ctk.CTkLabel(
-            loss_card, text="", anchor="w", justify="left",
+            meso_card, text="", anchor="w", justify="left",
             text_color=INK_FAINT, font=self._font(9, bold=False),
         )
         self._i18n(self._record_sale_hint, "record_sale_hint", size=9, bold=False)
-        self._record_sale_hint.grid(row=11, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        self._record_sale_hint.grid(row=7, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
         self._record_sale_hint.grid_remove()
 
         # Three buttons share one row: the left cycles Pause/Resume/Start
@@ -691,7 +706,7 @@ class OverlayApp:
         # one thing the right button, unconditional Restart, can't do), the
         # right is Restart. Stop and Restart are hidden while stopped.
         button_row = ctk.CTkFrame(parent, fg_color="transparent")
-        button_row.grid(row=4, column=0, sticky="ew", padx=2, pady=(0, 2))
+        button_row.grid(row=5, column=0, sticky="ew", padx=2, pady=(0, 2))
         button_row.grid_columnconfigure(0, weight=1)
         button_row.grid_columnconfigure(1, weight=1)
         button_row.grid_columnconfigure(2, weight=1)
@@ -726,7 +741,7 @@ class OverlayApp:
             text_color=EXP_COLOR, font=self._font(10, bold=True),
             anchor="w", justify="left", wraplength=320,
         )
-        self._update_hint_label.grid(row=5, column=0, sticky="ew", padx=2, pady=(4, 2))
+        self._update_hint_label.grid(row=6, column=0, sticky="ew", padx=2, pady=(4, 2))
         self._update_hint_label.grid_remove()
 
         # Compatibility-capture warning (shown when WGC isn't doing the work --
@@ -736,7 +751,7 @@ class OverlayApp:
             text_color=EXP_COLOR, font=self._font(9, bold=True),
             anchor="w", justify="left", wraplength=320,
         )
-        self._compat_hint_label.grid(row=6, column=0, sticky="ew", padx=2, pady=(0, 2))
+        self._compat_hint_label.grid(row=7, column=0, sticky="ew", padx=2, pady=(0, 2))
         self._compat_hint_label.grid_remove()
 
     def _build_history_tab(self, parent) -> None:
@@ -1143,10 +1158,10 @@ class OverlayApp:
         add_potion_entry(5, "settings_mp_potion_restore", "mp_potion_restore")
         potion_card.grid_columnconfigure(0, weight=1)
 
-        # QUICK-SLOT POTION (2026-09-02): mark the quickbar row and pick the
-        # slot holding the potion; the app reads that slot's count at
-        # session start/end so the potion cost uses the real bottles consumed
-        # instead of the HP/MP-loss estimate.
+        # QUICK-SLOT POTION (2026-09-02, reworked 2026-09-03): pick which of
+        # the 8 quickbar slots holds the HP potion and which holds the MP
+        # potion. Positions auto-detect at the bottom-right; a manual mark
+        # overrides that.
         quick_card = ctk.CTkFrame(scroll, fg_color=SURFACE, corner_radius=12)
         quick_card.pack(fill="x", padx=2, pady=(4, 2))
         self._i18n(
@@ -1157,41 +1172,28 @@ class OverlayApp:
             "settings_quick_slot_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
 
-        # Slot picker: 關閉 + 1..12.
-        slot_row = ctk.CTkFrame(quick_card, fg_color="transparent")
-        slot_row.pack(fill="x", padx=12, pady=(0, 3))
-        ctk.CTkLabel(slot_row, text=self._t("settings_quick_slot_index"), font=self._font(10, bold=False),
-                     text_color=INK, anchor="w").pack(side="left")
-        slot_values = [self._t("settings_quick_slot_off")] + [str(i) for i in range(1, 13)]
-        self._quick_slot_menu = ctk.CTkOptionMenu(
-            slot_row, values=slot_values, command=self._on_quick_slot_changed,
-            fg_color=SURFACE_2, button_color=SURFACE_2, button_hover_color=TRACK_BG,
-            text_color=INK, font=self._font(10, bold=False),
-            dropdown_fg_color=SURFACE_2, dropdown_hover_color=TRACK_BG,
-            dropdown_text_color=INK, dropdown_font=self._font(10, bold=False),
-        )
-        self._quick_slot_menu.set(
-            str(self._settings.quick_slot_index)
-            if self._settings.quick_slot_index
-            else self._t("settings_quick_slot_off")
-        )
-        self._quick_slot_menu.pack(side="right")
+        slot_values = [self._t("settings_quick_slot_off")] + list(QUICK_SLOT_NAMES)
 
-        # Potion kind: HP or MP (which unit price applies to the consumed
-        # count).
-        kind_row = ctk.CTkFrame(quick_card, fg_color="transparent")
-        kind_row.pack(fill="x", padx=12, pady=(0, 3))
-        ctk.CTkLabel(kind_row, text=self._t("settings_quick_slot_kind"), font=self._font(10, bold=False),
-                     text_color=INK, anchor="w").pack(side="left")
-        self._quick_kind_menu = ctk.CTkOptionMenu(
-            kind_row, values=["HP", "MP"], command=self._on_quick_kind_changed,
-            fg_color=SURFACE_2, button_color=SURFACE_2, button_hover_color=TRACK_BG,
-            text_color=INK, font=self._font(10, bold=False),
-            dropdown_fg_color=SURFACE_2, dropdown_hover_color=TRACK_BG,
-            dropdown_text_color=INK, dropdown_font=self._font(10, bold=False),
-        )
-        self._quick_kind_menu.set(self._settings.quick_slot_kind.upper())
-        self._quick_kind_menu.pack(side="right")
+        def add_slot_picker(i18n_key: str, attr: str) -> None:
+            row = ctk.CTkFrame(quick_card, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=(0, 3))
+            ctk.CTkLabel(row, text=self._t(i18n_key), font=self._font(10, bold=False),
+                         text_color=INK, anchor="w").pack(side="left")
+            menu = ctk.CTkOptionMenu(
+                row, values=slot_values,
+                command=lambda v, a=attr: self._on_quick_slot_changed(a, v),
+                fg_color=SURFACE_2, button_color=SURFACE_2, button_hover_color=TRACK_BG,
+                text_color=INK, font=self._font(10, bold=False),
+                dropdown_fg_color=SURFACE_2, dropdown_hover_color=TRACK_BG,
+                dropdown_text_color=INK, dropdown_font=self._font(10, bold=False),
+            )
+            idx = getattr(self._settings, attr)
+            menu.set(self._t("settings_quick_slot_off") if not idx else QUICK_SLOT_NAMES[idx - 1])
+            menu.pack(side="right")
+            setattr(self, "_quick_menu_" + attr, menu)
+
+        add_slot_picker("settings_quick_slot_hp", "hp_quick_slot_index")
+        add_slot_picker("settings_quick_slot_mp", "mp_quick_slot_index")
 
         self._quick_bar_button = ctk.CTkButton(
             quick_card, command=self._on_set_quick_bar,
@@ -1425,24 +1427,21 @@ class OverlayApp:
         self._rebuild_manual_source()
         self._persist_settings()
 
-    # ---- quick-slot potion (2026-09-02) -----------------------------------
+    # ---- quick-slot potion (2026-09-02, reworked 2026-09-03) ---------------
 
-    def _on_quick_slot_changed(self, value: str) -> None:
-        """Potion slot picker: '關閉…' disables, a number selects the slot."""
+    def _on_quick_slot_changed(self, attr: str, value: str) -> None:
+        """Quick-slot picker: '關閉' disables, a key name selects the slot
+        (1-8). `attr` is "hp_quick_slot_index" / "mp_quick_slot_index"."""
         if value == self._t("settings_quick_slot_off"):
-            self._settings.quick_slot_index = 0
+            setattr(self._settings, attr, 0)
         else:
             try:
-                self._settings.quick_slot_index = int(value)
+                idx = QUICK_SLOT_NAMES.index(value) + 1
             except ValueError:
                 return
+            setattr(self._settings, attr, idx)
         self._persist_settings()
         self._apply_visibility()
-        self._render(self._last)
-
-    def _on_quick_kind_changed(self, value: str) -> None:
-        self._settings.quick_slot_kind = value.lower()
-        self._persist_settings()
         self._render(self._last)
 
     def _on_set_quick_bar(self) -> None:
@@ -1454,8 +1453,8 @@ class OverlayApp:
         self._persist_settings()
 
     def _refresh_quick_bar_status(self) -> None:
-        """Settings line showing whether the quickbar row has been marked
-        (with its screen coordinates when set)."""
+        """Settings line: whether the quickbar uses the auto (bottom-right)
+        position or a manually marked one."""
         if getattr(self, "_quick_bar_status_label", None) is None:
             return
         region = self._settings.manual_quick_bar_region
@@ -1467,44 +1466,79 @@ class OverlayApp:
                 text=f"{self._t('settings_quick_bar_set')} ({l},{t})-({r},{b})"
             )
 
-    def _read_quick_slot_count(self) -> int | None:
-        """OCR the potion count in the selected quickbar slot (2026-09-02).
-
-        The user marks the whole quickbar row (manual_quick_bar_region); the
-        selected slot (quick_slot_index, 1-12) is a 1/12 slice of that row.
-        Returns None when unreadable -- slot number squeezed out by a narrow
-        UI is exactly the truncation case the settings hint warns about, so
-        a missing read just means 'no new data this pass'."""
+    def _grab_quick_bar_image(self) -> Image.Image | None:
+        """The whole quickbar row as an image: the manually marked screen
+        region when set (mss, screen coords), else the auto bottom-right
+        region cropped out of the game frame (QUICK_BAR_FRAC)."""
         s = self._settings
-        if not (s.quick_slot_index and s.manual_quick_bar_region):
-            return None
-        try:
-            l, t, r, b = s.manual_quick_bar_region
-            slot_w = (r - l) / 12.0
-            n = s.quick_slot_index
-            left = int(l + (n - 1) * slot_w)
-            right = int(l + n * slot_w)
-            if right <= left or b <= t:
-                return None
+        if s.manual_quick_bar_region is not None:
             if sys.platform != "win32":
-                return None  # dev/test has no real screen to grab
-            import mss
+                return None
+            l, t, r, b = s.manual_quick_bar_region
+            try:
+                import mss
 
-            with mss.mss() as m:
-                shot = m.grab(
-                    {"left": left, "top": t, "width": right - left, "height": b - t}
-                )
-                img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-            text = self._ocr.read_field(img)
-            return parse_meso(text)
+                with mss.mss() as m:
+                    shot = m.grab({"left": l, "top": t, "width": r - l, "height": b - t})
+                return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            except Exception:
+                return None
+        try:
+            frame = self._active_source().grab_full()
         except Exception:
             return None
+        w, h = frame.size
+        l, t, r, b = QUICK_BAR_FRAC
+        return frame.crop((int(l * w), int(t * h), int(r * w), int(b * h)))
+
+    def _read_slot_counts(self) -> dict[int, int]:
+        """Detect the potion count in each of the 8 quickbar slots, returning
+        {slot_index: count} for slots whose count was read. Detection (not
+        recognition-only) is used because the count sits at a variable spot
+        inside each slot; the small region keeps it cheap. Keys/other text
+        are filtered out by parse_meso (digit-run only)."""
+        img = self._grab_quick_bar_image()
+        if img is None:
+            return {}
+        try:
+            boxes = self._ocr.detect_text(img)
+        except Exception:
+            return {}
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            return {}
+        result: dict[int, int] = {}
+        for x, y, bw, bh, text in boxes:
+            val = parse_meso(text)
+            if val is None:
+                continue
+            cx, cy = x + bw / 2.0, y + bh / 2.0
+            col = int(cx / (w / 4.0))
+            row = int(cy / (h / 2.0))
+            if 0 <= col < 4 and 0 <= row < 2:
+                slot = row * 4 + col + 1
+                result[slot] = val
+        return result
+
+    def _scan_quick_slots_to_last(self) -> None:
+        """Read the quick-slot potion counts and stash them in the _last_*
+        fields so the potion rows show a value before a session has started
+        (辨識 pass, 2026-09-03)."""
+        s = self._settings
+        if not (s.hp_quick_slot_index or s.mp_quick_slot_index):
+            return
+        counts = self._read_slot_counts()
+        if s.hp_quick_slot_index in counts:
+            self._last_hp_slot_count = counts[s.hp_quick_slot_index]
+        if s.mp_quick_slot_index in counts:
+            self._last_mp_slot_count = counts[s.mp_quick_slot_index]
 
     def _maybe_scan_quick_slot(self) -> None:
         """Throttled per-tick quickbar read (same cadence as the manual meso
-        scan): while running, feed the slot count into Session so start/end
-        endpoints land (see Session.record_quick_slot)."""
-        if not (self._settings.quick_slot_index and self._settings.manual_quick_bar_region):
+        scan): while running, feed the HP/MP slot counts into Session so
+        start/end endpoints land (see Session.record_potion)."""
+        s = self._settings
+        if not (s.hp_quick_slot_index or s.mp_quick_slot_index):
             return
         if self._run_state != "running":
             return
@@ -1512,10 +1546,14 @@ class OverlayApp:
         if self._quick_slot_ticks < QUICK_SLOT_SCAN_INTERVAL_TICKS:
             return
         self._quick_slot_ticks = 0
-        value = self._read_quick_slot_count()
-        if value is not None:
-            self._session.record_quick_slot(value)
-            self._render(self._last)
+        counts = self._read_slot_counts()
+        if not counts:
+            return
+        if s.hp_quick_slot_index in counts:
+            self._session.record_potion("hp", counts[s.hp_quick_slot_index])
+        if s.mp_quick_slot_index in counts:
+            self._session.record_potion("mp", counts[s.mp_quick_slot_index])
+        self._render(self._last)
 
     def _select_region(self, callback, title_key: str) -> None:
         """Open the fullscreen region selector and hand the result to `callback`
@@ -1537,12 +1575,15 @@ class OverlayApp:
 
         visible_kv = {
             "startexp": True, "expdiff": True, "eta": s.show_eta,
-            "projexp": s.show_proj_exp, "hploss": s.show_hp, "mploss": s.show_mp,
+            "projexp": s.show_proj_exp,
             "mesostart": s.track_meso, "mesocurrent": s.track_meso,
-            "mesosale": s.track_meso, "mesototal": s.track_meso,
-            # Quick-slot row shows once the player picked a slot.
-            "quickslot": bool(s.quick_slot_index) and s.manual_quick_bar_region is not None,
-            # Potion rows only make sense once the player configured prices.
+            "mesosale": s.track_meso,
+            # Potion slot/count rows show once the player picked a slot.
+            "hpslot": bool(s.hp_quick_slot_index),
+            "mpslot": bool(s.mp_quick_slot_index),
+            "hpcount": bool(s.hp_quick_slot_index),
+            "mpcount": bool(s.mp_quick_slot_index),
+            # Potion cost/net rows only make sense once prices are configured.
             "potioncost": self._potion_enabled(), "netmeso": self._potion_enabled(),
         }
         for key, (lbl, value) in self._kv_rows.items():
@@ -1823,6 +1864,7 @@ class OverlayApp:
         self._manual_overrides.clear()
         if frame is not None and stat_frac:
             self._read_detected_values(frame, stat_frac)
+        self._scan_quick_slots_to_last()
         self._render(self._last)
 
     def _run_manual_detection(self) -> None:
@@ -1877,6 +1919,7 @@ class OverlayApp:
         self._manual_overrides.clear()
         if frame is not None and stat_frac:
             self._read_detected_values(frame, stat_frac)
+        self._scan_quick_slots_to_last()
         self._render(self._last)
 
     def _on_detect_clicked(self) -> None:
@@ -2207,6 +2250,7 @@ class OverlayApp:
                     return
             self._commit_pending_session()
             self._session.start()
+            self._sale_done = False  # new session: 賣裝收益/淨收益 reset
             self._run_state = "running"
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
@@ -2255,6 +2299,7 @@ class OverlayApp:
             return
         delta = self._session.record_sale(value)
         self._sale_recorded = True
+        self._sale_done = True
         booked = delta if (delta is not None and delta > 0) else 0
         self._detect_result_text = self._t("record_sale_done", n=f"{booked:,}")
         self._detect_result_ok = True
@@ -2329,7 +2374,10 @@ class OverlayApp:
         self._compact_win = win
 
         grid = ctk.CTkFrame(win, fg_color=BG)
-        grid.pack(fill="both", expand=True, padx=6, pady=(6, 0))
+        # No expand: the 2x2 grid keeps its natural height and the timer +
+        # button row below stay visible (the bug where the buttons got pushed
+        # out of the 300px window by expand=True + taller 3-line cells).
+        grid.pack(fill="x", padx=6, pady=(6, 0))
         for c in (0, 1):
             grid.grid_columnconfigure(c, weight=1)
         for r in (0, 1):
@@ -2356,8 +2404,8 @@ class OverlayApp:
                 self._compact_meso_sub = sub
             return cell
 
-        add_cell("compact_hp_loss", "hploss", 0, 0, HP_COLOR)
-        add_cell("compact_mp_loss", "mploss", 0, 1, MP_COLOR)
+        add_cell("compact_hp_potion", "hpcount", 0, 0, HP_COLOR)
+        add_cell("compact_mp_potion", "mpcount", 0, 1, MP_COLOR)
         add_cell("compact_meso", "meso", 1, 0, EXP_COLOR)
         add_cell("compact_exp", "exp", 1, 1, EXP_COLOR)
 
@@ -2431,12 +2479,15 @@ class OverlayApp:
     def _render_compact(self, snap) -> None:
         if self._compact_win is None or not self._compact_win.winfo_exists():
             return
-        hp_loss, mp_loss = self._session.hp_loss, self._session.mp_loss
-        self._compact_labels["hploss"].configure(
-            text=_fmt_loss(hp_loss), text_color=HP_COLOR if hp_loss > 0 else INK_FAINT,
+        hp_count = self._session.hp_slot_count
+        self._compact_labels["hpcount"].configure(
+            text=f"{hp_count:,}" if hp_count is not None else "--",
+            text_color=HP_COLOR if hp_count is not None else INK_FAINT,
         )
-        self._compact_labels["mploss"].configure(
-            text=_fmt_loss(mp_loss), text_color=MP_COLOR if mp_loss > 0 else INK_FAINT,
+        mp_count = self._session.mp_slot_count
+        self._compact_labels["mpcount"].configure(
+            text=f"{mp_count:,}" if mp_count is not None else "--",
+            text_color=MP_COLOR if mp_count is not None else INK_FAINT,
         )
         total = self._session.total_meso
         if total is not None:
@@ -2856,27 +2907,27 @@ class OverlayApp:
     def _potion_cost(self) -> int:
         """Session potion spend.
 
-        Two paths:
-        - Quick-slot path (2026-09-02): when the player marked a quickbar
-          slot and the counter has been read at both ends, cost = bottles
-          consumed × the selected potion's unit price -- the real number.
+        Two paths per stat (HP and MP independently):
+        - Quick-slot path (2026-09-02, reworked 2026-09-03): when the player
+          picked a quickbar slot and the counter has been read at both ends,
+          cost = bottles consumed × the unit price -- the real number.
         - Fallback: HP/MP loss estimate, bottles needed = ceil(loss /
           restore) times the unit price (integer ceil so a partial bottle
           counts as a full one).
         """
         s = self._settings
-        if s.quick_slot_index and s.manual_quick_bar_region:
-            consumed = self._session.quick_slot_consumed
-            if consumed is not None:
-                price = s.hp_potion_price if s.quick_slot_kind == "hp" else s.mp_potion_price
-                return consumed * price
+        hp_consumed = self._session.hp_potion_consumed if s.hp_quick_slot_index else None
+        mp_consumed = self._session.mp_potion_consumed if s.mp_quick_slot_index else None
         cost = 0
-        hp_loss, mp_loss = self._session.hp_loss, self._session.mp_loss
-        if s.hp_potion_restore > 0 and hp_loss > 0:
-            bottles = (hp_loss + s.hp_potion_restore - 1) // s.hp_potion_restore
+        if hp_consumed is not None:
+            cost += hp_consumed * s.hp_potion_price
+        elif s.hp_potion_restore > 0 and self._session.hp_loss > 0:
+            bottles = (self._session.hp_loss + s.hp_potion_restore - 1) // s.hp_potion_restore
             cost += bottles * s.hp_potion_price
-        if s.mp_potion_restore > 0 and mp_loss > 0:
-            bottles = (mp_loss + s.mp_potion_restore - 1) // s.mp_potion_restore
+        if mp_consumed is not None:
+            cost += mp_consumed * s.mp_potion_price
+        elif s.mp_potion_restore > 0 and self._session.mp_loss > 0:
+            bottles = (self._session.mp_loss + s.mp_potion_restore - 1) // s.mp_potion_restore
             cost += bottles * s.mp_potion_price
         return cost
 
@@ -2983,12 +3034,31 @@ class OverlayApp:
         else:
             self._value_labels["projexp"].configure(text="--")
 
-        hp_loss, mp_loss = self._session.hp_loss, self._session.mp_loss
-        self._value_labels["hploss"].configure(
-            text=_fmt_loss(hp_loss), text_color=HP_COLOR if hp_loss > 0 else INK_FAINT
+        # Potion card (2026-09-03): slot positions + live potion counts.
+        s = self._settings
+        if s.hp_quick_slot_index:
+            self._value_labels["hpslot"].configure(
+                text=QUICK_SLOT_NAMES[s.hp_quick_slot_index - 1], text_color=INK,
+            )
+        else:
+            self._value_labels["hpslot"].configure(text="--", text_color=INK)
+        if s.mp_quick_slot_index:
+            self._value_labels["mpslot"].configure(
+                text=QUICK_SLOT_NAMES[s.mp_quick_slot_index - 1], text_color=INK,
+            )
+        else:
+            self._value_labels["mpslot"].configure(text="--", text_color=INK)
+        hp_count = self._session.hp_slot_count
+        if hp_count is None:
+            hp_count = self._last_hp_slot_count
+        self._value_labels["hpcount"].configure(
+            text=f"{hp_count:,}" if hp_count is not None else "--", text_color=INK,
         )
-        self._value_labels["mploss"].configure(
-            text=_fmt_loss(mp_loss), text_color=MP_COLOR if mp_loss > 0 else INK_FAINT
+        mp_count = self._session.mp_slot_count
+        if mp_count is None:
+            mp_count = self._last_mp_slot_count
+        self._value_labels["mpcount"].configure(
+            text=f"{mp_count:,}" if mp_count is not None else "--", text_color=INK,
         )
 
         # Meso block: "起始楓幣" shows the session baseline; "當前楓幣" shows
@@ -3014,45 +3084,34 @@ class OverlayApp:
         else:
             self._value_labels["mesocurrent"].configure(text="--", text_color=INK)
 
-        # Equipment-sale revenue + total meso (see Session.record_sale) --
-        # populated after the session stops and the user records a sale.
+        # 賣裝收益 + 淨收益 only calculate after 記錄賣裝 (2026-09-03): before
+        # that the sale revenue is unknown, so net income would be wrong.
         sale = self._session.sale_revenue
-        self._value_labels["mesosale"].configure(
-            text=f"+{sale:,}", text_color=EXP_COLOR if sale > 0 else INK_FAINT,
-        )
-        total = self._session.total_meso
-        if total is not None:
-            sign = "+" if total >= 0 else "-"
-            self._value_labels["mesototal"].configure(
-                text=f"{sign}{abs(total):,}",
-                text_color=EXP_COLOR if total >= 0 else HP_COLOR,
+        if self._sale_done:
+            self._value_labels["mesosale"].configure(
+                text=f"+{sale:,}", text_color=EXP_COLOR if sale > 0 else INK_FAINT,
             )
         else:
-            self._value_labels["mesototal"].configure(text="--", text_color=INK)
+            self._value_labels["mesosale"].configure(text="--", text_color=INK)
 
         # Potion cost + net income (2026-08-28): visible only when the
         # player configured potion prices on the Settings tab.
         cost = self._potion_cost()
-        if self._settings.quick_slot_index and self._settings.manual_quick_bar_region is not None:
-            consumed = self._session.quick_slot_consumed
-            if consumed is not None:
-                self._value_labels["quickslot"].configure(
-                    text=self._t("quick_slot_consumed", n=consumed),
-                    text_color=EXP_COLOR if consumed > 0 else INK_FAINT,
-                )
-            else:
-                self._value_labels["quickslot"].configure(text="--", text_color=INK)
         if self._potion_enabled():
             self._value_labels["potioncost"].configure(
                 text=f"-{cost:,}" if cost > 0 else "0",
                 text_color=HP_COLOR if cost > 0 else INK_FAINT,
             )
-            if total is not None:
-                net = total - cost
-                self._value_labels["netmeso"].configure(
-                    text=f"{net:+,}",
-                    text_color=OK_COLOR if net >= 0 else HP_COLOR,
-                )
+            if self._sale_done:
+                total = self._session.total_meso
+                if total is not None:
+                    net = total - cost
+                    self._value_labels["netmeso"].configure(
+                        text=f"{net:+,}",
+                        text_color=OK_COLOR if net >= 0 else HP_COLOR,
+                    )
+                else:
+                    self._value_labels["netmeso"].configure(text="--", text_color=INK)
             else:
                 self._value_labels["netmeso"].configure(text="--", text_color=INK)
 
@@ -3075,7 +3134,10 @@ class OverlayApp:
         else:
             # Idle only if NONE of HP/MP/EXP have changed recently within this
             # session -- any one of them moving counts as activity, not idle.
-            idle = hp_loss == 0 and mp_loss == 0 and (exp_diff or 0) == 0
+            # (HP/MP loss is still tracked internally for the potion-cost
+            # fallback even though it's no longer shown.)
+            idle = (self._session.hp_loss == 0 and self._session.mp_loss == 0
+                    and (exp_diff or 0) == 0)
             if idle:
                 self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
             else:

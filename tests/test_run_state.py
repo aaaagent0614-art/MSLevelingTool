@@ -130,6 +130,9 @@ class _StubApp:
         self._compact_win = None
         self._manual_overrides: dict = {}
         self._last_meso: int | None = None
+        self._last_hp_slot_count: int | None = None
+        self._last_mp_slot_count: int | None = None
+        self._sale_done = False
 
         self.rebuild_calls = 0
 
@@ -197,7 +200,9 @@ class _StubApp:
     _potion_enabled = OverlayApp._potion_enabled
     _potion_cost = OverlayApp._potion_cost
     _maybe_scan_quick_slot = OverlayApp._maybe_scan_quick_slot
-    _read_quick_slot_count = OverlayApp._read_quick_slot_count
+    _read_slot_counts = OverlayApp._read_slot_counts
+    _grab_quick_bar_image = OverlayApp._grab_quick_bar_image
+    _scan_quick_slots_to_last = OverlayApp._scan_quick_slots_to_last
 
 
 def _calibrate(app: _StubApp, gains=(100,)) -> None:
