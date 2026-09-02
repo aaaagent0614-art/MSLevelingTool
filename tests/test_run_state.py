@@ -111,7 +111,7 @@ class _StubApp:
 
     def __init__(self):
         self._settings = Settings()
-        self._session = Session()
+        self._session = Session(require_calibration=False)  # mirrors OverlayApp (HP/MP retired 2026-09-02)
         self._session_history: list[SessionSummary] = []
         self._history_cards: list = []
         self._last = StatSnapshot(None, None, None, None, None, None, None)
@@ -242,18 +242,20 @@ def test_app_launches_stopped_and_does_not_track():
     for _ in range(5):
         app._do_tick()
     assert app._run_state == "stopped"
-    assert app._session.is_calibrating  # never fed a tick
+    # Never fed while stopped: the session has not started (no calibration
+    # gate anymore -- HP/MP retired 2026-09-02 -- so 'not started' is simply
+    # a start_exp that was never committed).
     assert app._session.start_exp is None
     assert app._session_history == []
 
 
 def test_stopped_app_still_shows_live_ocr_readouts():
-    """Not tracking a session is not the same as a frozen HUD -- LV/HP/MP/EXP
-    keep reading from the game while stopped, same as while paused."""
+    """Not tracking a session is not the same as a frozen HUD -- LV/EXP
+    keep reading from the game while stopped (HP/MP rows were removed)."""
     app = _StubApp()
     app._do_tick()
     assert app._value_labels["level"].cget("text") == "44"
-    assert app._value_labels["hp"].cget("text") == "800/824"
+    assert "100" in app._value_labels["exp"].cget("text")
 
 
 def test_start_button_begins_tracking():

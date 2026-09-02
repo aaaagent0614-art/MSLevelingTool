@@ -96,8 +96,8 @@ class Settings:
     # Default on per user request (2026-08-24).
     track_meso: bool = True
     # Play a sound (and briefly flash the window) when a session auto-stops or
-    # is stopped manually. Default off.
-    notify_on_stop: bool = False
+    # is stopped manually. Default ON per user request (2026-09-02).
+    notify_on_stop: bool = True
     # Manual screen-region calibration (2026-08-24). When use_manual is on and
     # manual_stat_region is set, the capture layer OCRs the user-marked screen
     # rectangles directly via mss instead of locating the game window. This is
