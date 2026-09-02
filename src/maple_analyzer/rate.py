@@ -51,6 +51,15 @@ class SessionSummary:
     # a session spans one, since the game's counter resets to ~0. None only for
     # summaries built before this existed, which fall back to the subtraction.
     exp_gained: int | None = None
+    # Total wall-clock seconds the session spent paused (frozen via
+    # Session.pause() -- the stop-into-pending flow pauses a session that is
+    # then committed later, possibly minutes/hours afterwards). 0 for sessions
+    # that never paused. duration_s subtracts this so a summary's duration is
+    # the *active* session time, matching Session.elapsed() -- otherwise the
+    # wait between Stop and the eventual commit inflates duration and dilutes
+    # every per-minute metric. 0 by default, so summaries persisted before
+    # this field existed keep their old (unpaused) durations.
+    paused_s: float = 0.0
     # Meso delta over the session, from the inventory counter (see
     # parser.find_meso_from_boxes). Both endpoints are real OCR readings: the
     # first valid meso value seen after the session started, and the last
@@ -92,7 +101,10 @@ class SessionSummary:
 
     @property
     def duration_s(self) -> float:
-        return self.end_time - self.start_time
+        # Active time: wall-clock span minus whatever the session spent
+        # paused. A session that stopped (paused) and was committed later
+        # must not count the wait as grinding time.
+        return max(0.0, (self.end_time - self.start_time) - self.paused_s)
 
     @property
     def exp_per_min(self) -> float | None:
@@ -203,27 +215,39 @@ class _LossTracker:
             self._last = cur
         self._candidate = None
 
-    def record(self, cur: int | None, maximum: int | None = None, level: int | None = None) -> None:
+    def record(self, cur: int | None, maximum: int | None = None, level: int | None = None) -> bool:
+        """Feed one reading. Returns True when `cur` was accepted (it became
+        the tracker's new baseline / was committed into the loss math), False
+        when it was rejected as garbage or held aside awaiting corroboration.
+
+        Session.record relies on this to decide whether the reading is safe
+        to carry across a session boundary as the next start() baseline: a
+        rejected tick must NOT update Session._hp_cur/_mp_cur, or a garbage
+        final tick of one session poisons the next session's baseline (the
+        tracker's own guarded `_last` is discarded by reset())."""
         if cur is None:
-            return
+            return False
         if maximum is not None:
             accepted = self._accept_max(maximum, level)
             if level is not None:
                 self._last_level = level
             if not accepted:
-                return  # misparsed tick -- don't let it near the loss math
+                return False  # misparsed tick -- don't let it near the loss math
             if cur > maximum:
-                return  # cur can never exceed max; this reading is garbage
+                return False  # cur can never exceed max; this reading is garbage
         if self._last is None:
             self._last = cur
-            return
+            return True
         tolerance = (self._max or self._last) * self.OUTLIER_FRACTION
         if abs(cur - self._last) <= tolerance:
             self._commit(cur)
+            return True
         elif self._candidate is not None and abs(cur - self._candidate) <= tolerance:
             self._commit(cur)  # corroborated -- a real jump after all
+            return True
         else:
             self._candidate = cur  # hold; a normal reading next tick discards it
+            return False
 
     def _commit(self, cur: int) -> None:
         if cur < self._last:
@@ -593,11 +617,15 @@ class Session:
             self.start()
         if self._start_exp is None and exp_cur is not None:
             self._start_exp = exp_cur
-        self._hp.record(hp_cur, hp_max, level)
-        self._mp.record(mp_cur, mp_max, level)
-        if hp_cur is not None:
+        # Only an ACCEPTED reading updates _hp_cur/_mp_cur. These two fields
+        # become the next session's baseline via start() -> _LossTracker.reset()
+        # (see _LossTracker.record's docstring), so an unguarded store would
+        # let a rejected garbage tick (max mismatch / cur>max / uncorroborated
+        # outlier) poison the *next* session with a phantom loss on its very
+        # first clean reading -- the guard only protected within a session.
+        if self._hp.record(hp_cur, hp_max, level):
             self._hp_cur = hp_cur
-        if mp_cur is not None:
+        if self._mp.record(mp_cur, mp_max, level):
             self._mp_cur = mp_cur
         self._record_exp(exp_cur, exp_pct, level)
 
@@ -893,7 +921,16 @@ class Session:
         return int(diff / elapsed * window_s)
 
     def finalize(self, interval_minutes: float | None = None, now: float | None = None) -> SessionSummary:
-        end_time = now if now is not None else time.time()
+        now = now if now is not None else time.time()
+        end_time = now
+        # Total pause time this session accumulated, including the *ongoing*
+        # pause when finalize is called while paused (the stop-into-pending
+        # flow does exactly that: _stop_into_pending pauses, and the commit
+        # happens later, still paused). Mirrors elapsed()'s arithmetic so
+        # duration_s == the pause-adjusted active time.
+        paused_s = self._paused_total
+        if self._paused and self._pause_started_at is not None:
+            paused_s += max(0.0, now - self._pause_started_at)
         return SessionSummary(
             start_time=self._start_time if self._start_time is not None else end_time,
             end_time=end_time,
@@ -904,6 +941,7 @@ class Session:
             total_exp=self._total_exp,
             interval_minutes=interval_minutes,
             exp_gained=self.exp_diff,
+            paused_s=paused_s,
             start_meso=self._start_meso,
             end_meso=self._end_meso,
             meso_gained=self.meso_gained,

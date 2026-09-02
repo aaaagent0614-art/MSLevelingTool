@@ -40,6 +40,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -237,11 +238,21 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
 
 
 def _version_is_newer(a: str, b: str) -> bool:
-    """Compare two 'x.y.z' version strings numerically."""
-    try:
-        return tuple(int(p) for p in a.split(".")) > tuple(int(p) for p in b.split("."))
-    except Exception:
-        return a > b
+    """Compare two version strings numerically: True when a is newer than b.
+
+    Only the leading 'x.y.z' numeric triple counts; any suffix ('-beta',
+    '-rc1', …) is ignored -- a pre-release tag of the SAME version is never
+    \"newer\" than the release itself, and suffix strings would otherwise
+    corrupt the parse (int('0-beta') raises, and the old lexicographic
+    fallback then wrongly ranked '1.8.0-beta' above '1.8.0')."""
+    def _triple(v: str) -> tuple[int, int, int] | None:
+        m = re.match(r"(\d+)\.(\d+)\.(\d+)", v.strip())
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+    pa, pb = _triple(a), _triple(b)
+    if pa is None or pb is None:
+        return False  # unparseable -- never claim an update we can't stand behind
+    return pa > pb
 
 
 class OverlayApp:
@@ -2792,7 +2803,8 @@ class OverlayApp:
                 )
             import mss
 
-            mon = mss.mss().monitors[0]
+            with mss.mss() as m:
+                mon = m.monitors[0]
             return (int(mon["width"]), int(mon["height"]))
         except Exception:
             return None

@@ -296,7 +296,13 @@ class GameWindowCapture:
             raise RuntimeError("game window is minimized")
         left, top = self._win32gui.ClientToScreen(hwnd, (0, 0))
         _, _, right, bottom = self._win32gui.GetClientRect(hwnd)
-        shot = mss.mss().grab({"left": left, "top": top, "width": right, "height": bottom})
+        # mss has no __del__/atexit -- an unclosed instance leaks its screen
+        # DCs + DIB until process exit. This path runs every tick in fallback
+        # mode, so an unclosed instance here would leak two GDI handles +
+        # ~9MB per tick and exhaust Windows' GDI object limit (~10k, roughly
+        # 80 minutes at 2Hz). The context manager closes it deterministically.
+        with mss.mss() as m:
+            shot = m.grab({"left": left, "top": top, "width": right, "height": bottom})
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
     def _probe_wgc(self) -> bool:
@@ -594,19 +600,24 @@ class ManualScreenCapture:
     ):
         if sys.platform != "win32":
             raise RuntimeError("ManualScreenCapture requires Windows (mss + real desktop)")
-        import mss
-
-        self._mss = mss.mss()
         self._stat_region = stat_region
         self._meso_region = meso_region
         left, top, right, bottom = stat_region
         self.client_size = (right - left, bottom - top)
 
     def _grab(self, region: tuple[int, int, int, int]) -> Image.Image:
+        # mss has no __del__ -- a stored instance would leak its screen DCs +
+        # DIB until process exit. ManualScreenCapture instances are rebuilt
+        # every time the user re-marks a region or re-runs 辨識, so each one
+        # must release its handles; a fresh mss() per grab is cheap next to
+        # the OCR that follows (and the context manager closes deterministically).
+        import mss
+
         left, top, right, bottom = region
-        shot = self._mss.grab(
-            {"left": left, "top": top, "width": right - left, "height": bottom - top}
-        )
+        with mss.mss() as m:
+            shot = m.grab(
+                {"left": left, "top": top, "width": right - left, "height": bottom - top}
+            )
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
     def grab_full(self) -> Image.Image:
