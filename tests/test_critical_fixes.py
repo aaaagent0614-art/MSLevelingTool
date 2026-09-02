@@ -145,3 +145,69 @@ def test_version_is_newer_unparseable_never_claims_an_update():
     assert newer("garbage", "1.8.0") is False
     assert newer("1.8.0", "garbage") is False
     assert newer("v2", "1.8.0") is False  # no full x.y.z triple
+
+
+# ---- 2026-09-02 feature fixes: potion used on History, net meso -----------
+
+def test_finalize_stamps_quick_slot_potion_used():
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200, hp_max=824, mp_max=2816)
+    s.record_potion("hp", 30)
+    s.record_potion("hp", 25)  # 5 HP bottles gone
+    s.record_potion("mp", 10)
+    s.record_potion("mp", 7)   # 3 MP bottles gone
+    summary = s.finalize(interval_minutes=10, now=100.0)
+    assert summary.hp_potion_used == 5
+    assert summary.mp_potion_used == 3
+
+
+def test_finalize_potion_used_none_without_slot_reads():
+    """Sessions that never tracked quick-slot counts keep the fields None so
+    History can render '--' instead of a fabricated 0."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200, hp_max=824, mp_max=2816)
+    summary = s.finalize(interval_minutes=10, now=100.0)
+    assert summary.hp_potion_used is None
+    assert summary.mp_potion_used is None
+
+
+def test_history_net_total():
+    """History meso headline: drop + item sale - potion spend."""
+    net = overlay_module._history_net_total
+
+    class FakeSummary:
+        pass
+
+    def mk(meso_gained, sale_meso=0, potion_cost=0):
+        s = FakeSummary()
+        s.meso_gained = meso_gained
+        s.sale_meso = sale_meso
+        s.potion_cost = potion_cost
+        return s
+
+    assert net(mk(10_000)) == 10_000
+    assert net(mk(10_000, sale_meso=5_000)) == 15_000
+    assert net(mk(10_000, sale_meso=5_000, potion_cost=3_200)) == 11_800
+    assert net(mk(10_000, potion_cost=12_000)) == -2_000
+    assert net(mk(None, sale_meso=5_000, potion_cost=1_000)) == 4_000
+    assert net(mk(None)) is None
+
+
+def test_summary_new_potion_fields_survive_round_trip_without_them():
+    """Summaries persisted before the potion fields existed load fine (the
+    dataclass defaults kick in) and the fields are None/0, not errors."""
+    from dataclasses import asdict
+
+    from maple_analyzer.rate import SessionSummary
+
+    s = SessionSummary(
+        start_time=0.0, end_time=60.0, start_exp=1000, end_exp=1100,
+        hp_loss=0, mp_loss=0, total_exp=2000.0, interval_minutes=10.0,
+    )
+    d = asdict(s)
+    for field in ("hp_potion_used", "mp_potion_used", "potion_cost"):
+        d.pop(field)
+    loaded = SessionSummary(**d)
+    assert loaded.hp_potion_used is None
+    assert loaded.mp_potion_used is None
+    assert loaded.potion_cost == 0

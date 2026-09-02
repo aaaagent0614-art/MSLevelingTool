@@ -24,6 +24,17 @@ from maple_analyzer.rate import Session, SessionSummary
 from maple_analyzer.settings import Settings
 
 
+@pytest.fixture(autouse=True)
+def _auto_confirm_dialogs(monkeypatch):
+    """Auto-confirm every messagebox so run-state tests don't open real Tk
+    dialogs on the stub root. The pre-start missing-source checks (2026-09-02)
+    and the sale/delete confirmations all route through messagebox; tests that
+    assert a specific dialog answer override this locally with their own
+    monkeypatch.setattr."""
+    monkeypatch.setattr(overlay_module.messagebox, "askyesno", lambda *a, **kw: True)
+    monkeypatch.setattr(overlay_module.messagebox, "showwarning", lambda *a, **kw: None)
+
+
 class _StubWidget:
     """Minimal stand-in for any CTkLabel/CTkButton/CTkFrame OverlayApp calls
     .configure/.cget/.grid/.grid_remove/.grid_info/.set on."""
@@ -182,6 +193,7 @@ class _StubApp:
     _maybe_refresh_manual_meso = OverlayApp._maybe_refresh_manual_meso
     _commit_session_to_history = OverlayApp._commit_session_to_history
     _finalize_and_maybe_stop = OverlayApp._finalize_and_maybe_stop
+    _refresh_compare_tab = OverlayApp._refresh_compare_tab
     _stop_into_pending = OverlayApp._stop_into_pending
     _commit_pending_session = OverlayApp._commit_pending_session
     _confirm_start_without_sale = OverlayApp._confirm_start_without_sale
@@ -522,3 +534,34 @@ def test_close_commits_pending_session():
     app._on_close()
     assert app._session_pending is False
     assert len(app._session_history) == 1
+
+
+def test_start_prompts_when_meso_never_detected_and_cancel_stays_stopped(monkeypatch):
+    """Pre-start check (2026-09-02): with meso tracking on but the counter
+    never read, Start asks first; answering No keeps the app stopped."""
+    app = _StubApp()
+    app._settings.track_meso = True
+    app._last_meso = None
+    calls = []
+    monkeypatch.setattr(
+        overlay_module.messagebox, "askyesno",
+        lambda *a, **kw: calls.append(True) or False,  # user says No
+    )
+    app._on_pause_button_clicked()  # Start
+    assert calls == [True]           # the missing-meso prompt appeared
+    assert app._run_state == "stopped"
+    assert not app._session_pending
+
+
+def test_start_skips_meso_prompt_when_counter_was_read(monkeypatch):
+    app = _StubApp()
+    app._settings.track_meso = True
+    app._last_meso = 1_234_567
+    calls = []
+    monkeypatch.setattr(
+        overlay_module.messagebox, "askyesno",
+        lambda *a, **kw: calls.append(True) or False,
+    )
+    app._on_pause_button_clicked()
+    assert calls == []               # no prompt when meso was seen before
+    assert app._run_state == "running"

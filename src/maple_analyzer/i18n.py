@@ -61,11 +61,14 @@ _STRINGS: dict[str, dict[Lang, str]] = {
 
     "history_empty": {"en": "No sessions yet", "zh": "尚無紀錄"},
     "history_session": {"en": "SESSION #{n}", "zh": "紀錄 #{n}"},
-    "history_hp_loss": {"en": "HP LOSS", "zh": "HP 損失"},
-    "history_mp_loss": {"en": "MP LOSS", "zh": "MP 損失"},
+    "history_hp_potion": {"en": "HP POTION", "zh": "HP 藥水"},
+    "history_mp_potion": {"en": "MP POTION", "zh": "MP 藥水"},
     "history_meso": {"en": "MESO", "zh": "楓幣"},
-    "history_meso_wild": {"en": "Wild {n}", "zh": "野生 {n}"},
-    "history_meso_equip": {"en": "Equip {n}", "zh": "裝備 {n}"},
+    # Meso-cell breakdown labels on a History card (2026-09-02): the headline
+    # is the net total (drop + item sale - potion spend), these are its parts.
+    "history_meso_wild": {"en": "Drop {n}", "zh": "掉落 {n}"},
+    "history_meso_equip": {"en": "Item {n}", "zh": "道具 {n}"},
+    "history_potion_spend": {"en": "Potion {n}", "zh": "藥水 {n}"},
     "history_exp": {"en": "EXP", "zh": "經驗值"},
     "history_exp_per_min": {"en": "EXP/MIN", "zh": "經驗/分"},
     "history_restarted_early": {"en": "restarted early", "zh": "提前重啟"},
@@ -253,6 +256,22 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "sale_pending_prompt": {
         "en": "Equipment revenue hasn't been recorded for the last session. Start a new record anyway?",
         "zh": "尚未計算裝備收益，是否開始新的紀錄？",
+    },
+
+    # Pre-start checks (2026-09-02): warn when a data source the session is
+    # supposed to track was never seen -- the meso counter only exists while
+    # the inventory is open, and the quick-slot potion count needs the slot
+    # set AND the quickbar visible. Ask, don't block: the player may be
+    # deliberately skipping that metric this session.
+    "start_warn_meso_title": {"en": "Meso counter not detected", "zh": "沒有偵測到楓幣"},
+    "start_warn_meso_prompt": {
+        "en": "The meso counter hasn't been read yet -- it only exists while the inventory (I) is open. Open the inventory so the counter can be read, then Start. Start anyway?",
+        "zh": "沒有偵測到楓幣——楓幣數字只在開啟道具欄（I）時出現。請開啟道具欄讓程式讀到數字。仍要開始嗎？",
+    },
+    "start_warn_potion_title": {"en": "Potion count not detected", "zh": "沒有偵測到藥水數量"},
+    "start_warn_potion_prompt": {
+        "en": "No count was read for the {kind} potion slot. Make sure the potion is in the selected quickbar slot and press 辨識/Detect to read it. Start anyway?",
+        "zh": "沒有偵測到 {kind} 藥水數量。請確認藥水放在選定的快捷鍵格子，並按「辨識」讀取數量。仍要開始嗎？",
     },
 
     # Compact overlay metric labels (derived values the game itself doesn't

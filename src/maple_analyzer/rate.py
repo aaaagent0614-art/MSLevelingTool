@@ -60,6 +60,17 @@ class SessionSummary:
     # every per-minute metric. 0 by default, so summaries persisted before
     # this field existed keep their old (unpaused) durations.
     paused_s: float = 0.0
+    # Quick-slot potion bottles actually consumed this session (start count -
+    # end count per the quickbar OCR), when the player picked a slot. None for
+    # sessions without quick-slot tracking -- History shows '--' rather than a
+    # fabricated 0. Set by Session.finalize from hp_potion_consumed.
+    hp_potion_used: int | None = None
+    mp_potion_used: int | None = None
+    # Total potion spend in meso, computed at commit time by the UI layer
+    # (rate.py has no prices; overlay stamps it alongside map_name). 0 when no
+    # prices were configured or nothing was consumed. History's 總收益 row is
+    # meso_gained + sale_meso - potion_cost.
+    potion_cost: int = 0
     # Meso delta over the session, from the inventory counter (see
     # parser.find_meso_from_boxes). Both endpoints are real OCR readings: the
     # first valid meso value seen after the session started, and the last
@@ -942,6 +953,8 @@ class Session:
             interval_minutes=interval_minutes,
             exp_gained=self.exp_diff,
             paused_s=paused_s,
+            hp_potion_used=self.hp_potion_consumed,
+            mp_potion_used=self.mp_potion_consumed,
             start_meso=self._start_meso,
             end_meso=self._end_meso,
             meso_gained=self.meso_gained,

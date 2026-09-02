@@ -212,6 +212,20 @@ def _fmt_loss(loss: int) -> str:
     return f"-{loss}" if loss > 0 else "0"
 
 
+def _history_net_total(s: SessionSummary) -> int | None:
+    """History card's meso headline: drop meso + equipment sale proceeds -
+    potion spend (2026-09-02). None when the session never read any meso
+    endpoint (no inventory openings) and recorded no sale either."""
+    meso_g = s.meso_gained
+    sale_m = s.sale_meso or 0
+    cost = s.potion_cost or 0
+    if meso_g is not None:
+        return meso_g + sale_m - cost
+    if sale_m:
+        return sale_m - cost
+    return None
+
+
 def _fmt_summary(s: SessionSummary, index: int) -> str:
     # Console/debug log only, not shown in the UI -- deliberately left in
     # plain English regardless of self._settings.language.
@@ -758,7 +772,11 @@ class OverlayApp:
         self._update_hint_label = ctk.CTkLabel(
             parent, text="", corner_radius=8, fg_color=SURFACE_2,
             text_color=EXP_COLOR, font=self._font(10, bold=True),
-            anchor="w", justify="left", wraplength=290,
+            # wraplength is widget-scaled (x1.2) before reaching Tk, so the
+            # effective wrap point is 240*1.2 = 288px -- just inside the
+            # ~292px card content width at the 400px window. See the comment
+            # on _wraplength users for the scaling trap.
+            anchor="w", justify="left", wraplength=240,
         )
         self._update_hint_label.grid(row=6, column=0, sticky="ew", padx=2, pady=(4, 2))
         self._update_hint_label.grid_remove()
@@ -768,7 +786,7 @@ class OverlayApp:
         self._compat_hint_label = ctk.CTkLabel(
             parent, text="", corner_radius=8, fg_color=SURFACE_2,
             text_color=EXP_COLOR, font=self._font(9, bold=True),
-            anchor="w", justify="left", wraplength=290,
+            anchor="w", justify="left", wraplength=240,
         )
         self._compat_hint_label.grid(row=7, column=0, sticky="ew", padx=2, pady=(0, 2))
         self._compat_hint_label.grid_remove()
@@ -1128,7 +1146,14 @@ class OverlayApp:
             command=self._on_track_meso_changed,
         ), "settings_track_meso", size=11, bold=False).pack(fill="x", padx=12, pady=0)
         self._i18n(
-            ctk.CTkLabel(card, anchor="w", wraplength=290, justify="left", text_color=INK_FAINT),
+            # NOTE the scaling trap: CTkLabel multiplies wraplength by the
+            # widget scaling (1.2) before handing it to Tk, so the value here
+            # must be ~1.2x SMALLER than the pixel width you actually want
+            # (240 -> Tk sees 288px, which fits the ~292px card content at
+            # the 400px window). A value >= 244 would push Tk's wrap point
+            # past the card edge and the text would be clipped instead of
+            # wrapped (reported 2026-09-02: "字數超過框框看不到").
+            ctk.CTkLabel(card, anchor="w", wraplength=240, justify="left", text_color=INK_FAINT),
             "settings_track_meso_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
 
@@ -1140,7 +1165,7 @@ class OverlayApp:
             ctk.CTkLabel(potion_card, anchor="w", text_color=INK_DIM), "settings_potion", size=11, bold=True
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(5, 0))
         self._i18n(
-            ctk.CTkLabel(potion_card, anchor="w", wraplength=290, justify="left", text_color=INK_FAINT),
+            ctk.CTkLabel(potion_card, anchor="w", wraplength=240, justify="left", text_color=INK_FAINT),
             "settings_potion_hint", size=9, bold=False,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 3))
 
@@ -1187,7 +1212,7 @@ class OverlayApp:
             ctk.CTkLabel(quick_card, anchor="w", text_color=INK_DIM), "settings_quick_slot", size=11, bold=True
         ).pack(fill="x", padx=12, pady=(5, 0))
         self._i18n(
-            ctk.CTkLabel(quick_card, anchor="w", wraplength=290, justify="left", text_color=INK_FAINT),
+            ctk.CTkLabel(quick_card, anchor="w", wraplength=240, justify="left", text_color=INK_FAINT),
             "settings_quick_slot_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
 
@@ -1263,12 +1288,12 @@ class OverlayApp:
         self._meso_region_button.pack(fill="x", padx=12, pady=(0, 3))
 
         self._manual_status_label = ctk.CTkLabel(
-            manual_card, anchor="w", wraplength=290, justify="left", text_color=INK_FAINT,
+            manual_card, anchor="w", wraplength=240, justify="left", text_color=INK_FAINT,
             font=self._font(9, bold=False),
         )
         self._manual_status_label.pack(fill="x", padx=12, pady=(0, 3))
         self._manual_warning_label = ctk.CTkLabel(
-            manual_card, anchor="w", wraplength=290, justify="left", text_color=HP_COLOR,
+            manual_card, anchor="w", wraplength=240, justify="left", text_color=HP_COLOR,
             font=self._font(9, bold=True),
         )
         self._manual_warning_label.pack(fill="x", padx=12, pady=(0, 5))
@@ -2184,7 +2209,14 @@ class OverlayApp:
             # Stamp the session's map (typed or auto-OCR'd) onto the record so
             # History cards can show it -- the engine (rate.py) doesn't know
             # about maps, this is purely a UI-layer enrichment at commit time.
-            summary = dataclasses.replace(summary, map_name=self._settings.map_name or None)
+            # potion_cost is stamped the same way: prices live in Settings,
+            # so the UI computes the spend while the session is still alive
+            # (before start() clears its counters).
+            summary = dataclasses.replace(
+                summary,
+                map_name=self._settings.map_name or None,
+                potion_cost=self._potion_cost(),
+            )
             self._session_history.append(summary)
             self._log(f"[{time.strftime('%H:%M:%S')}] {_fmt_summary(summary, len(self._session_history))}")
             self._append_history_card(summary, len(self._session_history))
@@ -2275,6 +2307,33 @@ class OverlayApp:
                     and self._settings.track_meso):
                 if not self._confirm_start_without_sale():
                     return
+            # Pre-start checks (2026-09-02): warn when a data source this
+            # session is supposed to track was never read at all -- the meso
+            # counter only exists while the inventory is open, and the
+            # quick-slot potion count needs a slot set AND a successful 辨識.
+            # Ask (continue/cancel) rather than block: the player may be
+            # deliberately tracking EXP only this session.
+            if self._settings.track_meso and self._last_meso is None:
+                with self._modal():
+                    if not messagebox.askyesno(
+                        self._t("start_warn_meso_title"),
+                        self._t("start_warn_meso_prompt"),
+                        parent=self.root,
+                    ):
+                        return
+            missing_slots = []
+            if self._settings.hp_quick_slot_index and self._last_hp_slot_count is None:
+                missing_slots.append("HP")
+            if self._settings.mp_quick_slot_index and self._last_mp_slot_count is None:
+                missing_slots.append("MP")
+            if missing_slots:
+                with self._modal():
+                    if not messagebox.askyesno(
+                        self._t("start_warn_potion_title"),
+                        self._t("start_warn_potion_prompt", kind="、".join(missing_slots)),
+                        parent=self.root,
+                    ):
+                        return
             self._commit_pending_session()
             self._session.start()
             self._sale_done = False  # new session: 賣裝收益/淨收益 reset
@@ -2698,24 +2757,40 @@ class OverlayApp:
             exp_c = EXP_COLOR if summary.exp_diff >= 0 else HP_COLOR
         mini_stat(0, 0, self._t("history_exp"), exp_s, exp_c)
 
-        # Meso cell splits into WILD (in-session drops) + EQUIP (equipment
-        # sold afterwards) per user request (2026-08-27) -- the old single
-        # total hid how much came from each source. Wild is the headline;
-        # the equipment line only appears when a sale was recorded.
-        wild_s, wild_c = "--", INK_FAINT
-        if summary.meso_gained is not None:
-            wild_s = self._t("history_meso_wild", n=f"{summary.meso_gained:+,}")
-            wild_c = EXP_COLOR if summary.meso_gained >= 0 else HP_COLOR
-        equip_sub = None
-        if summary.sale_meso:
-            equip_sub = self._t("history_meso_equip", n=f"{summary.sale_meso:+,}")
-        # Both meso lines share one colour (EXP_COLOR -- it's income, per
-        # user request 2026-08-27: 野生/裝備 size matches the other cells,
-        # colour unified).
-        mini_stat(0, 1, self._t("history_meso"), wild_s, wild_c, sub=equip_sub, sub_color=EXP_COLOR)
+        # Meso cell (2026-09-02 rework): the headline is now the NET total
+        # (掉落楓幣 + 道具收入 − 藥水成本), with the breakdown on the sub
+        # line -- wild meso gained in-session, equipment sale proceeds, and
+        # potion spend (only the parts that exist).
+        net_total = _history_net_total(summary)
+        meso_g = summary.meso_gained
+        sale_m = summary.sale_meso or 0
+        cost = summary.potion_cost or 0
+        if net_total is not None:
+            net_s = f"{net_total:+,}"
+            net_c = EXP_COLOR if net_total > 0 else (HP_COLOR if net_total < 0 else INK_DIM)
+        else:
+            net_s, net_c = "--", INK_FAINT
+        breakdown = []
+        if meso_g is not None:
+            breakdown.append(self._t("history_meso_wild", n=f"{meso_g:+,}"))
+        if sale_m:
+            breakdown.append(self._t("history_meso_equip", n=f"{sale_m:+,}"))
+        if cost:
+            breakdown.append(self._t("history_potion_spend", n=f"-{cost:,}"))
+        mini_stat(0, 1, self._t("history_meso"), net_s, net_c,
+                  sub="   ".join(breakdown) if breakdown else None, sub_color=EXP_COLOR)
 
-        mini_stat(1, 0, self._t("history_hp_loss"), _fmt_loss(summary.hp_loss), HP_COLOR if summary.hp_loss > 0 else INK_FAINT)
-        mini_stat(1, 1, self._t("history_mp_loss"), _fmt_loss(summary.mp_loss), MP_COLOR if summary.mp_loss > 0 else INK_FAINT)
+        # HP/MP cells now show quick-slot potion bottles used (per user request
+        # 2026-09-02: the real consumed count is more meaningful than the raw
+        # HP/MP loss it caused). '--' for sessions recorded without a slot.
+        hp_used = summary.hp_potion_used
+        mp_used = summary.mp_potion_used
+        mini_stat(1, 0, self._t("history_hp_potion"),
+                  f"{hp_used:,}" if hp_used is not None else "--",
+                  HP_COLOR if hp_used else INK_FAINT)
+        mini_stat(1, 1, self._t("history_mp_potion"),
+                  f"{mp_used:,}" if mp_used is not None else "--",
+                  MP_COLOR if mp_used else INK_FAINT)
 
     @contextlib.contextmanager
     def _modal(self):
