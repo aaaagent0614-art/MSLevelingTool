@@ -222,6 +222,24 @@ def _fmt_loss(loss: int) -> str:
     return f"-{loss}" if loss > 0 else "0"
 
 
+@dataclasses.dataclass
+class _Baseline:
+    """The pre-start snapshot the player confirmed (or hand-edited) in the
+    start dialog: everything the new session's numbers are measured against.
+    EXP/HP/MP mirror the latest OCR snapshot; meso + quick-slot counts were
+    read while the inventory was open (they can't be re-read after Start)."""
+    exp_cur: int | None = None
+    exp_pct: float | None = None
+    hp_cur: int | None = None
+    hp_max: int | None = None
+    mp_cur: int | None = None
+    mp_max: int | None = None
+    level: int | None = None
+    meso: int | None = None
+    hp_potion: int | None = None
+    mp_potion: int | None = None
+
+
 def _history_net_total(s: SessionSummary) -> int | None:
     """History card's meso headline: drop meso + equipment sale proceeds -
     potion spend (2026-09-02). None when the session never read any meso
@@ -366,8 +384,14 @@ class OverlayApp:
         self._detect_result_ok = False
         # Compact 2x2 gameplay overlay (see _ensure_compact_win) -- shown while
         # a session is running so the full window can stay minimized.
+        # Baseline of the CURRENT session (confirmed in the pre-start dialog,
+        # 2026-09-02): the compact window shows 初始 = this, 變化 = Session.
+        self._baseline: _Baseline = _Baseline()
         self._compact_win = None
         self._compact_labels: dict[str, ctk.CTkLabel] = {}
+        # 初始 (start) value labels -- grey small line above the coloured
+        # delta (2026-09-02: each cell shows 初始 + 變化).
+        self._compact_initial: dict[str, ctk.CTkLabel] = {}
         self._compact_eta = None  # set inside _ensure_compact_win's add_cell
         self._compact_meso_sub = None  # meso cell's third line (net income)
         # Manual stat overrides (2026-08-27): values the player typed over an
@@ -702,6 +726,16 @@ class OverlayApp:
         add_kv_row(potion_card, 1, "mpslot", "kv_mp_potion_slot")
         add_kv_row(potion_card, 2, "hpcount", "kv_hp_potion_count")
         add_kv_row(potion_card, 3, "mpcount", "kv_mp_potion_count")
+        # Setup hint row: shown when NO quick-slot is picked yet. The card is
+        # always visible (2026-09-02 user request) so the player can see the
+        # potion area exists and jump straight to the Settings tab.
+        self._potion_setup_row = ctk.CTkButton(
+            potion_card, command=self._go_potion_settings,
+            fg_color="transparent", hover_color=SURFACE_2, text_color=ACCENT,
+            anchor="w", corner_radius=8, height=28,
+        )
+        self._i18n(self._potion_setup_row, "potion_setup_hint", size=11, bold=False)
+        self._potion_setup_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 6))
 
         # Meso card (fourth block, 2026-09-03): start/current meso, potion
         # cost, and (only after 記錄賣裝) sale revenue + net income.
@@ -1444,6 +1478,10 @@ class OverlayApp:
             return
         self._detect_button.grid()
 
+    def _go_potion_settings(self) -> None:
+        """Dashboard potion-card setup hint -> jump to the Settings tab."""
+        self._tabview.set(self._tab_names["settings"])
+
     def _on_map_edit(self) -> None:
         with self._modal():
             name = simpledialog.askstring(
@@ -1648,13 +1686,14 @@ class OverlayApp:
         if getattr(self, "_meso_hint_label", None) is not None:
             self._meso_hint_label.grid() if s.track_meso else self._meso_hint_label.grid_remove()
 
-        # Potion card as a WHOLE is hidden while no quickbar slot is picked:
-        # its rows are all removed by the kv loop above, but an empty
-        # CTkFrame still requests ~132px and leaves a blank card on the
-        # dashboard (reported 2026-09-02).
+        # Potion card is ALWAYS visible (2026-09-02 user request): the per-slot
+        # rows appear once a slot is picked, otherwise the setup hint fills the
+        # card so it never renders as an unexplained blank block.
         if getattr(self, "_potion_card", None) is not None:
-            potion_on = bool(s.hp_quick_slot_index or s.mp_quick_slot_index)
-            self._potion_card.grid() if potion_on else self._potion_card.grid_remove()
+            self._potion_card.grid()
+            if getattr(self, "_potion_setup_row", None) is not None:
+                potion_on = bool(s.hp_quick_slot_index or s.mp_quick_slot_index)
+                self._potion_setup_row.grid() if not potion_on else self._potion_setup_row.grid_remove()
 
     # ---- tick loop ---------------------------------------------------------
 
@@ -2293,15 +2332,19 @@ class OverlayApp:
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
     def _start_session_with_current_values(self) -> None:
-        """Begin a new session, seeding the engine with the UI's latest
-        OCR'd readings first (sync_known).
-
-        The UI OCRs continuously even while stopped, so the current screen
-        state is richer than the engine's own memory (which froze at the
-        previous session's end -- or is empty on first launch). Without this
-        hand-off the new session's baseline would be stale/absent and the
-        compact window's numbers would look re-detected from scratch
-        (reported 2026-09-02)."""
+        """Begin a new session (restart / auto-stop rollover path, where the
+        session is continuous so no confirm dialog is needed), seeding the
+        engine with the UI's latest OCR'd readings first (sync_known) and
+        recording those readings as the compact window's 初始 baseline."""
+        self._baseline = _Baseline(
+            exp_cur=self._last.exp_cur, exp_pct=self._last.exp_pct,
+            hp_cur=self._last.hp_cur, hp_max=self._last.hp_max,
+            mp_cur=self._last.mp_cur, mp_max=self._last.mp_max,
+            level=self._last.level,
+            # meso/potion NOT seeded here: unlike the confirm-dialog path the
+            # inventory is usually closed mid-grind, so a stale reading would
+            # poison the baseline. They stay None until the inventory reopens.
+        )
         self._session.sync_known(
             exp_cur=self._last.exp_cur, hp_cur=self._last.hp_cur,
             mp_cur=self._last.mp_cur, exp_pct=self._last.exp_pct,
@@ -2309,6 +2352,27 @@ class OverlayApp:
             level=self._last.level,
         )
         self._session.start()
+
+    def _confirm_start_baseline(self) -> _Baseline | None:
+        """Open the pre-start confirm dialog; None when the player cancels."""
+        with self._modal():
+            dlg = _StartBaselineDialog(self)
+            self.root.wait_window(dlg.top)
+        return dlg.result
+
+    def _start_session_with_baseline(self, b: _Baseline) -> None:
+        """Start a session from the confirmed baseline: engine carries the
+        confirmed EXP/HP/MP; meso/potion counts seed the endpoints directly
+        (inventory will likely be closed once grinding starts)."""
+        self._session.sync_known(
+            exp_cur=b.exp_cur, hp_cur=b.hp_cur, mp_cur=b.mp_cur,
+            exp_pct=b.exp_pct, hp_max=b.hp_max, mp_max=b.mp_max, level=b.level,
+        )
+        self._session.start(
+            initial_meso=b.meso,
+            initial_hp_potion=b.hp_potion,
+            initial_mp_potion=b.mp_potion,
+        )
 
     def _on_pause_button_clicked(self) -> None:
         """One button, three roles depending on _run_state -- see
@@ -2335,35 +2399,19 @@ class OverlayApp:
                     and self._settings.track_meso):
                 if not self._confirm_start_without_sale():
                     return
-            # Pre-start checks (2026-09-02): warn when a data source this
-            # session is supposed to track was never read at all -- the meso
-            # counter only exists while the inventory is open, and the
-            # quick-slot potion count needs a slot set AND a successful 辨識.
-            # Ask (continue/cancel) rather than block: the player may be
-            # deliberately tracking EXP only this session.
-            if self._settings.track_meso and self._last_meso is None:
-                with self._modal():
-                    if not messagebox.askyesno(
-                        self._t("start_warn_meso_title"),
-                        self._t("start_warn_meso_prompt"),
-                        parent=self.root,
-                    ):
-                        return
-            missing_slots = []
-            if self._settings.hp_quick_slot_index and self._last_hp_slot_count is None:
-                missing_slots.append("HP")
-            if self._settings.mp_quick_slot_index and self._last_mp_slot_count is None:
-                missing_slots.append("MP")
-            if missing_slots:
-                with self._modal():
-                    if not messagebox.askyesno(
-                        self._t("start_warn_potion_title"),
-                        self._t("start_warn_potion_prompt", kind="、".join(missing_slots)),
-                        parent=self.root,
-                    ):
-                        return
+            # Pre-start confirm dialog (2026-09-02): shows every value that
+            # will become this session's baseline -- EXP/HP/MP, meso and
+            # quick-slot counts (the latter only readable while the inventory
+            # is open, which is why they're captured BEFORE Start). The player
+            # confirms, re-runs 辨識, or hand-edits a misread. Cancel = stay
+            # stopped. This replaces the earlier per-source warning popups:
+            # missing values show inline as 未偵測到.
+            baseline = self._confirm_start_baseline()
+            if baseline is None:
+                return
             self._commit_pending_session()
-            self._start_session_with_current_values()
+            self._baseline = baseline
+            self._start_session_with_baseline(baseline)
             self._sale_done = False  # new session: 賣裝收益/淨收益 reset
             self._run_state = "running"
         self._apply_run_state()
@@ -2473,16 +2521,16 @@ class OverlayApp:
         win.title("MsStatTractor")
         win.attributes("-topmost", True)
         win.configure(fg_color=BG)
-        # 360x350 (was 360x300): at 120% widget scaling the four 3-line cells
-        # + timer leave less than the button row's height, so Tk squeezed the
-        # Pause/Stop/Restore buttons to ~11px -- effectively invisible
-        # (reported 2026-09-02: "小窗沒有暫停/停止按鈕"). The extra height
-        # guarantees the 34px button row its full size.
+        # 360x410 (was 360x350): cells now carry four lines each (title /
+        # 初始 / 變化 / sub) after the 2026-09-02 request to show both the
+        # session-start value and its change in every cell. The extra height
+        # keeps the Pause/Stop/Restore row at full size (it was squeezed to
+        # ~11px -- invisible -- at 360x300).
         x, y = self._settings.compact_x, self._settings.compact_y
         if x is not None and y is not None:
-            win.geometry(f"360x350+{x}+{y}")
+            win.geometry(f"360x410+{x}+{y}")
         else:
-            win.geometry("360x350+60+60")
+            win.geometry("360x410+60+60")
         win.resizable(False, False)
         win.protocol("WM_DELETE_WINDOW", self._on_restore_main)
         self._compact_win = win
@@ -2504,14 +2552,19 @@ class OverlayApp:
             ctk.CTkLabel(cell, text=self._t(title_key), font=self._font(9, bold=True), text_color=color, anchor="w").grid(
                 row=0, column=0, sticky="w", padx=(8, 0), pady=(4, 0)
             )
-            val = ctk.CTkLabel(cell, text="--", font=_FONT_MONO_SM, text_color=INK, anchor="e")
-            val.grid(row=1, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
+            # Line 2: the session-START value (grey, small) -- the baseline the
+            # player confirmed in the pre-start dialog.
+            initial = ctk.CTkLabel(cell, text="--", font=_FONT_MONO_SM, text_color=INK_DIM, anchor="e")
+            initial.grid(row=1, column=0, sticky="e", padx=(0, 8), pady=(0, 0))
+            self._compact_initial[key] = initial
+            # Line 3: the CHANGE (coloured, large) -- this is the headline.
+            val = ctk.CTkLabel(cell, text="--", font=_FONT_MONO_BOLD, text_color=INK, anchor="e")
+            val.grid(row=2, column=0, sticky="e", padx=(0, 8), pady=(0, 0))
             self._compact_labels[key] = val
-            # Every cell gets a third line so all four come out the same
-            # height -- the EXP cell carries the level-up ETA there, the
-            # others a space placeholder (per user request 2026-08-28).
+            # Line 4: sub -- EXP carries the level-up ETA, meso the net
+            # income, others a space placeholder (keeps all cells equal height).
             sub = ctk.CTkLabel(cell, text=" ", font=_FONT_MONO_SM, text_color=INK_DIM, anchor="e")
-            sub.grid(row=2, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
+            sub.grid(row=3, column=0, sticky="e", padx=(0, 8), pady=(0, 4))
             if key == "exp":
                 self._compact_eta = sub
             if key == "meso":
@@ -2593,40 +2646,40 @@ class OverlayApp:
     def _render_compact(self, snap) -> None:
         if self._compact_win is None or not self._compact_win.winfo_exists():
             return
-        # Fall back to the UI's last 辨識/live read until the Session has its
-        # own endpoints (the first ~5s after Start, before the first scan
-        # lands) -- without this the window blinked to '--' right after Start
-        # even though the values had just been detected (reported 2026-09-02).
-        hp_count = self._session.hp_slot_count
-        if hp_count is None:
-            hp_count = self._last_hp_slot_count
+        b = self._baseline
+        # HP potion: 初始 = confirmed start count; 變化 = bottles consumed
+        # (start - end, negative). '--' until the inventory is reopened and
+        # the end count is read.
+        hp_used = self._session.hp_potion_consumed
+        self._compact_initial["hpcount"].configure(
+            text=f"{b.hp_potion:,}" if b.hp_potion is not None else "--",
+        )
         self._compact_labels["hpcount"].configure(
-            text=f"{hp_count:,}" if hp_count is not None else "--",
-            text_color=HP_COLOR if hp_count is not None else INK_FAINT,
+            text=f"-{hp_used:,}" if hp_used is not None else "--",
+            text_color=HP_COLOR if hp_used else INK_FAINT,
         )
-        mp_count = self._session.mp_slot_count
-        if mp_count is None:
-            mp_count = self._last_mp_slot_count
+        mp_used = self._session.mp_potion_consumed
+        self._compact_initial["mpcount"].configure(
+            text=f"{b.mp_potion:,}" if b.mp_potion is not None else "--",
+        )
         self._compact_labels["mpcount"].configure(
-            text=f"{mp_count:,}" if mp_count is not None else "--",
-            text_color=MP_COLOR if mp_count is not None else INK_FAINT,
+            text=f"-{mp_used:,}" if mp_used is not None else "--",
+            text_color=MP_COLOR if mp_used else INK_FAINT,
         )
+        # Meso: 初始 = confirmed counter value; 變化 = net delta.
         total = self._session.total_meso
+        self._compact_initial["meso"].configure(
+            text=f"{b.meso:,}" if b.meso is not None else "--",
+        )
         if total is not None:
             sign = "+" if total >= 0 else "-"
             self._compact_labels["meso"].configure(
                 text=f"{sign}{abs(total):,}", text_color=EXP_COLOR if total >= 0 else HP_COLOR,
             )
-        elif self._last_meso is not None:
-            # No session delta yet (inventory not opened since Start) -- show
-            # the latest counter value read, like the dashboard's start row.
-            self._compact_labels["meso"].configure(
-                text=f"{self._last_meso:,}", text_color=INK,
-            )
         else:
             self._compact_labels["meso"].configure(text="--", text_color=INK_FAINT)
-        # Meso cell's third line: net income (meso − potion cost) when the
-        # player configured potion prices (2026-08-28).
+        # Meso cell's sub line: net income (meso − potion cost) when potion
+        # prices are configured.
         if getattr(self, "_compact_meso_sub", None) is not None:
             cost = self._potion_cost()
             if self._potion_enabled() and total is not None:
@@ -2637,11 +2690,18 @@ class OverlayApp:
                 )
             else:
                 self._compact_meso_sub.configure(text=" ", text_color=INK_DIM)
+        # EXP: 初始 = confirmed raw (+%); 變化 = raw delta only (the % change
+        # lives on the History record, per user request 2026-09-02).
+        if b.exp_cur is not None:
+            pct_s = f"  ({b.exp_pct:.2f}%)" if b.exp_pct is not None else ""
+            self._compact_initial["exp"].configure(text=f"{b.exp_cur:,}{pct_s}")
+        else:
+            self._compact_initial["exp"].configure(text="--")
         exp_diff = self._session.exp_diff
-        total_exp = snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
         if exp_diff is not None:
-            pct_s = f" (+{exp_diff / total_exp * 100:.2f}%)" if total_exp else ""
-            self._compact_labels["exp"].configure(text=f"+{exp_diff:,}{pct_s}")
+            self._compact_labels["exp"].configure(
+                text=f"+{exp_diff:,}", text_color=EXP_COLOR if exp_diff >= 0 else HP_COLOR,
+            )
         else:
             self._compact_labels["exp"].configure(text="--")
         eta_s = self._levelup_eta_s(snap)
@@ -2696,21 +2756,18 @@ class OverlayApp:
 
         head_left = ctk.CTkFrame(head, fg_color="transparent")
         head_left.grid(row=0, column=0, sticky="w")
+        # Title (2026-09-02 long-list layout): the map name replaces 紀錄 when
+        # one was set -- "鱷魚沼澤III #3" -- otherwise SESSION #n. A manual
+        # rename (click) overrides both.
+        base_title = self._t("history_session", n=index)
+        if summary.map_name:
+            base_title = f"{summary.map_name} #{index}"
         title_label = ctk.CTkLabel(
-            head_left, text=summary.name or self._t("history_session", n=index), font=self._font(10, bold=True),
-            text_color=INK_FAINT, cursor="hand2",
+            head_left, text=summary.name or base_title, font=self._font(11, bold=True),
+            text_color=INK, cursor="hand2",
         )
         title_label.pack(side="left")
         title_label.bind("<Button-1>", lambda _e, i=index, lbl=title_label: self._on_rename_clicked(i, lbl))
-
-        # Map badge (requested 2026-08-24): the session's map as a small accent
-        # pill next to the title, so a History card is self-describing about
-        # *where* it was recorded. Omitted when the map was never set.
-        if summary.map_name:
-            ctk.CTkLabel(
-                head_left, text=summary.map_name, font=self._font(10, bold=True),
-                text_color=ACCENT, fg_color=SURFACE_2, corner_radius=6, padx=6, pady=1,
-            ).pack(side="left", padx=(8, 0))
 
         head_right = ctk.CTkFrame(head, fg_color="transparent")
         head_right.grid(row=0, column=1, sticky="e")
@@ -2721,118 +2778,80 @@ class OverlayApp:
             fg_color="transparent", hover_color=SURFACE_2, text_color=INK_FAINT, font=_FONT_UI_BOLD,
         ).pack(side="right")
 
-        # Duration (e.g. "4.6分") in the top-right corner, left of the delete
-        # button. Shown as-is -- no early-restart annotation (per 2026-08-27).
+        meta = ctk.CTkFrame(card, fg_color="transparent")
+        meta.pack(fill="x", padx=12, pady=(0, 2))
+        start_ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(summary.start_time))
+        end_ts = time.strftime("%H:%M", time.localtime(summary.end_time))
         dur_min = summary.duration_s / 60
         unit = self._t("unit_min_short")
-        dur_text, dur_color, dur_font = f"{dur_min:.1f}{unit}", INK_DIM, _FONT_MONO_SM
-        ctk.CTkLabel(head_right, text=dur_text, font=dur_font, text_color=dur_color).pack(side="right", padx=(0, 6))
-
-        timestamp = ctk.CTkFrame(card, fg_color="transparent")
-        timestamp.pack(fill="x", padx=12, pady=(0, 4))
-        start_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(summary.start_time))
-        end_ts = time.strftime("%H:%M:%S", time.localtime(summary.end_time))
         ctk.CTkLabel(
-            timestamp, text=f"{start_ts} → {end_ts}", font=_FONT_MONO_SM, text_color=INK_FAINT,
+            meta, text=f"{start_ts} → {end_ts}   ·   {dur_min:.1f}{unit}",
+            font=_FONT_MONO_SM, text_color=INK_FAINT,
         ).pack(side="left")
 
-        rng = ctk.CTkFrame(card, fg_color="transparent")
-        rng.pack(fill="x", padx=12, pady=(0, 8))
-        start_s = f"{summary.start_exp:,}" if summary.start_exp is not None else "?"
-        end_s = f"{summary.end_exp:,}" if summary.end_exp is not None else "?"
-        diff = summary.exp_diff
+        # Long-list layout (2026-09-02): labelled rows under section dividers,
+        # replacing the old 2x2 mini-grid -- easier to read at a glance.
+        def divider() -> None:
+            ctk.CTkFrame(card, fg_color=SURFACE_2, height=1).pack(fill="x", padx=12, pady=3)
+
+        def section(title: str) -> None:
+            ctk.CTkLabel(card, text=title, font=self._font(9, bold=True),
+                         text_color=INK_DIM, anchor="w").pack(fill="x", padx=12, pady=(1, 0))
+
+        def row(label: str, value: str, color: str = INK, font=_FONT_MONO) -> None:
+            r = ctk.CTkFrame(card, fg_color="transparent")
+            r.pack(fill="x", padx=12, pady=0)
+            r.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(r, text=label, font=self._font(10, bold=False),
+                         text_color=INK_FAINT, anchor="w").grid(row=0, column=0, sticky="w")
+            ctk.CTkLabel(r, text=value, font=font, text_color=color, anchor="e").grid(row=0, column=1, sticky="e")
+
+        divider()
+        # EXP block: raw gain is the headline, % change second (per request).
+        section(self._t("history_exp"))
+        exp_diff = summary.exp_diff
+        row(self._t("history_exp_label"),
+            f"{exp_diff:+,}" if exp_diff is not None else "--",
+            color=EXP_COLOR if (exp_diff or 0) >= 0 else HP_COLOR,
+            font=_FONT_MONO_BOLD)
         pct_diff = summary.exp_pct_diff
-        # One row instead of two: the old right-aligned yellow diff (+10,427)
-        # duplicated the EXP cell in the 2x2 grid below, so it was removed per
-        # user request (2026-08-27). The range (start → end) is the headline,
-        # with the percentage/rate on the muted extras line underneath.
-        range_row = ctk.CTkFrame(rng, fg_color="transparent")
-        range_row.pack(fill="x")
-        ctk.CTkLabel(
-            range_row, text=f"{start_s} → {end_s}", font=_FONT_MONO, text_color=INK, anchor="w",
-        ).pack(side="left")
-        # Efficiency + percentage: muted, on their own row. The headline
-        # number stays the diff above.
-        extras: list[str] = []
-        if pct_diff is not None:
-            extras.append(f"+{pct_diff:.2f}%")
-        epm = summary.exp_per_min
-        if epm is not None:
-            extras.append(f"{epm:,.0f}/{self._t('unit_min_short')}")
-        if extras:
-            ctk.CTkLabel(
-                rng, text="  ".join(extras), font=_FONT_MONO_SM, text_color=INK_DIM, anchor="w",
-            ).pack(fill="x", pady=(2, 0))
+        row(self._t("history_exp_pct_label"),
+            f"+{pct_diff:.2f}%" if pct_diff is not None else "--", color=INK_DIM)
 
-        mini = ctk.CTkFrame(card, fg_color="transparent")
-        mini.pack(fill="x", padx=12, pady=(0, 10))
-        mini.grid_columnconfigure((0, 1), weight=1, uniform="mini")
+        divider()
+        # Potion consumption block.
+        section(self._t("history_potions_section"))
+        hp_used = summary.hp_potion_used
+        mp_used = summary.mp_potion_used
+        bottle = self._t("history_bottle_unit")
+        def potion_s(used: int | None) -> str:
+            if used is None:
+                return "--"
+            s = f"-{used:,}"
+            return f"{s} {bottle}" if bottle else s
+        row(self._t("history_hp_potion"), potion_s(hp_used),
+            color=HP_COLOR if hp_used else INK_FAINT, font=self._font(11))
+        row(self._t("history_mp_potion"), potion_s(mp_used),
+            color=MP_COLOR if mp_used else INK_FAINT, font=self._font(11))
 
-        def mini_stat(row: int, col: int, label: str, value: str, color: str, sub: str | None = None, sub_color: str = INK_DIM) -> None:
-            # Every cell renders exactly three lines (title / value / sub) so
-            # all four cells come out the same height even though the meso
-            # cell's sub carries the equip line (per user request 2026-08-27).
-            # Cells without a real sub line get a space placeholder.
-            box = ctk.CTkFrame(mini, fg_color=SURFACE_2, corner_radius=7)
-            box.grid(
-                row=row, column=col, sticky="nsew",
-                padx=(0 if col == 0 else 4, 0), pady=(0 if row == 0 else 4, 0),
-            )
-            ctk.CTkLabel(box, text=label, font=self._font(9, bold=True), text_color=INK_FAINT, anchor="w").pack(
-                fill="x", padx=8, pady=(6, 0)
-            )
-            ctk.CTkLabel(box, text=value, font=_FONT_MONO_SM, text_color=color, anchor="w").pack(
-                fill="x", padx=8, pady=(0, 6)
-            )
-            # Sub line uses the UI font family (same as the cell titles), so
-            # the CJK 野生/裝備 labels render in the same font as the rest of
-            # the card instead of a mono-font fallback (per 2026-08-28).
-            ctk.CTkLabel(box, text=sub or " ", font=self._font(10), text_color=sub_color, anchor="w").pack(
-                fill="x", padx=8, pady=(0, 6)
-            )
-
-        # 2x2 grid (per user request 2026-08-24): EXP top-left, meso top-right,
-        # HP loss bottom-left, MP loss bottom-right.
-        exp_s, exp_c = "--", INK_FAINT
-        if summary.exp_diff is not None:
-            exp_s = f"{summary.exp_diff:+,}"
-            exp_c = EXP_COLOR if summary.exp_diff >= 0 else HP_COLOR
-        mini_stat(0, 0, self._t("history_exp"), exp_s, exp_c)
-
-        # Meso cell (2026-09-02 rework): the headline is now the NET total
-        # (掉落楓幣 + 道具收入 − 藥水成本), with the breakdown on the sub
-        # line -- wild meso gained in-session, equipment sale proceeds, and
-        # potion spend (only the parts that exist).
-        net_total = _history_net_total(summary)
+        divider()
+        # Meso block: pure drops / item sales / potion cost (red) / total.
+        section(self._t("history_meso"))
         meso_g = summary.meso_gained
         sale_m = summary.sale_meso or 0
         cost = summary.potion_cost or 0
-        if net_total is not None:
-            net_s = f"{net_total:+,}"
-            net_c = EXP_COLOR if net_total > 0 else (HP_COLOR if net_total < 0 else INK_DIM)
-        else:
-            net_s, net_c = "--", INK_FAINT
-        breakdown = []
-        if meso_g is not None:
-            breakdown.append(self._t("history_meso_wild", n=f"{meso_g:+,}"))
+        net_total = _history_net_total(summary)
+        row(self._t("history_pure_meso"),
+            f"{meso_g:+,}" if meso_g is not None else "--",
+            color=EXP_COLOR if (meso_g or 0) >= 0 else HP_COLOR)
         if sale_m:
-            breakdown.append(self._t("history_meso_equip", n=f"{sale_m:+,}"))
+            row(self._t("history_item_sales"), f"+{sale_m:,}", color=EXP_COLOR)
         if cost:
-            breakdown.append(self._t("history_potion_spend", n=f"-{cost:,}"))
-        mini_stat(0, 1, self._t("history_meso"), net_s, net_c,
-                  sub="   ".join(breakdown) if breakdown else None, sub_color=EXP_COLOR)
-
-        # HP/MP cells now show quick-slot potion bottles used (per user request
-        # 2026-09-02: the real consumed count is more meaningful than the raw
-        # HP/MP loss it caused). '--' for sessions recorded without a slot.
-        hp_used = summary.hp_potion_used
-        mp_used = summary.mp_potion_used
-        mini_stat(1, 0, self._t("history_hp_potion"),
-                  f"{hp_used:,}" if hp_used is not None else "--",
-                  HP_COLOR if hp_used else INK_FAINT)
-        mini_stat(1, 1, self._t("history_mp_potion"),
-                  f"{mp_used:,}" if mp_used is not None else "--",
-                  MP_COLOR if mp_used else INK_FAINT)
+            row(self._t("kv_potion_cost"), f"-{cost:,}", color=HP_COLOR)
+        row(self._t("history_total_income"),
+            f"{net_total:+,}" if net_total is not None else "--",
+            color=OK_COLOR if (net_total or 0) >= 0 else HP_COLOR,
+            font=_FONT_MONO_BOLD)
 
     @contextlib.contextmanager
     def _modal(self):
@@ -3302,3 +3321,157 @@ class OverlayApp:
 
     def run(self) -> None:
         self.root.mainloop()
+
+
+class _StartBaselineDialog:
+    """Pre-start confirmation (2026-09-02). Shows every value that will become
+    the new session's baseline -- EXP/HP/MP from the live OCR stream, meso and
+    quick-slot potion counts read while the inventory was open. The player can
+    confirm, press 重新偵測 (e.g. they just opened the inventory), or click a
+    value to type a manual correction for an OCR misread. `result` is a
+    _Baseline on confirm, None on cancel."""
+
+    # (baseline key, i18n label key, app attribute for the auto value)
+    _ROWS = [
+        ("exp", "start_confirm_exp", "_last", "exp_cur"),
+        ("hp", "start_confirm_hp", "_last", "hp_cur"),
+        ("mp", "start_confirm_mp", "_last", "mp_cur"),
+        ("meso", "start_confirm_meso", None, "_last_meso"),
+        ("hp_potion", "start_confirm_hp_potion", None, "_last_hp_slot_count"),
+        ("mp_potion", "start_confirm_mp_potion", None, "_last_mp_slot_count"),
+    ]
+
+    def __init__(self, app: "OverlayApp"):
+        self.app = app
+        self.result: _Baseline | None = None
+        self._draft: dict[str, int] = {}  # manual edits, by row key
+
+        self.top = ctk.CTkToplevel(app.root)
+        self.top.title("MsStatTractor")
+        self.top.attributes("-topmost", True)
+        self.top.configure(fg_color=BG)
+        self.top.geometry("380x330+120+120")
+        self.top.resizable(False, False)
+        self.top.transient(app.root)
+        self.top.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        pad = ctk.CTkFrame(self.top, fg_color=BG)
+        pad.pack(fill="both", expand=True, padx=10, pady=10)
+        ctk.CTkLabel(pad, text=app._t("start_confirm_title"), font=app._font(14, bold=True),
+                     text_color=INK, anchor="w").pack(fill="x")
+        ctk.CTkLabel(pad, text=app._t("start_confirm_hint"), font=app._font(10, bold=False),
+                     text_color=INK_DIM, anchor="w", justify="left",
+                     wraplength=320).pack(fill="x", pady=(2, 8))
+
+        self._value_labels: dict[str, ctk.CTkLabel] = {}
+        for key, label_key, _src_obj, _src_attr in self._ROWS:
+            row = ctk.CTkFrame(pad, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+            ctk.CTkLabel(row, text=app._t(label_key), font=app._font(11, bold=False),
+                         text_color=INK_DIM, anchor="w").pack(side="left")
+            val = ctk.CTkLabel(row, text="--", font=_FONT_MONO, text_color=INK,
+                               anchor="e", cursor="hand2")
+            val.pack(side="right")
+            val.bind("<Button-1>", lambda _e, k=key: self._edit(k))
+            self._value_labels[key] = val
+
+        btns = ctk.CTkFrame(pad, fg_color="transparent")
+        btns.pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(btns, text=app._t("start_confirm_redetect"), command=self._redetect,
+                      fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
+                      height=32, font=app._font(12, bold=True)).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ctk.CTkButton(btns, text=app._t("cancel"), command=self._cancel,
+                      fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK_DIM,
+                      height=32, font=app._font(12, bold=True)).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(btns, text=app._t("start_confirm_start"), command=self._confirm,
+                      fg_color=ACCENT, text_color=ACCENT_INK, hover_color="#7ff2e0",
+                      height=32, font=app._font(12, bold=True)).pack(side="left", fill="x", expand=True)
+
+        self._refresh()
+
+    # ---- values ---------------------------------------------------------
+
+    def _auto_value(self, key: str):
+        """Current app reading for a row (draft overrides it)."""
+        if key in self._draft:
+            return self._draft[key]
+        for k, _lk, obj, attr in self._ROWS:
+            if k == key:
+                src = self.app if obj is None else getattr(self.app, obj)
+                return getattr(src, attr, None)
+        return None
+
+    def _refresh(self) -> None:
+        app = self.app
+        missing = app._t("start_confirm_missing")
+        for key, _lk, _o, _a in self._ROWS:
+            v = self._auto_value(key)
+            lbl = self._value_labels[key]
+            if v is None:
+                lbl.configure(text=missing, text_color=INK_FAINT)
+                continue
+            if key == "exp":
+                pct = self.app._last.exp_pct
+                pct_s = f"  ({pct:.2f}%)" if pct is not None else ""
+                lbl.configure(text=f"{v:,}{pct_s}", text_color=EXP_COLOR)
+            elif key == "hp":
+                mx = self.app._last.hp_max
+                lbl.configure(text=f"{v:,}" + (f"/{mx:,}" if mx else ""), text_color=HP_COLOR)
+            elif key == "mp":
+                mx = self.app._last.mp_max
+                lbl.configure(text=f"{v:,}" + (f"/{mx:,}" if mx else ""), text_color=MP_COLOR)
+            elif key == "meso":
+                lbl.configure(text=f"{v:,}", text_color=EXP_COLOR)
+            else:
+                lbl.configure(text=f"{v:,}", text_color=INK)
+        self.top.update_idletasks()
+
+    def _edit(self, key: str) -> None:
+        app = self.app
+        current = self._auto_value(key)
+        with app._modal():
+            answer = simpledialog.askstring(
+                app._t("start_confirm_edit_title"),
+                app._t("start_confirm_edit_prompt"),
+                initialvalue=f"{current:,}" if current is not None else "",
+                parent=self.top,
+            )
+        if answer is None:
+            return
+        answer = answer.strip().replace(",", "")
+        if answer == "":
+            self._draft.pop(key, None)  # revert to auto
+        else:
+            try:
+                self._draft[key] = int(answer)
+            except ValueError:
+                return
+        self._refresh()
+
+    def _redetect(self) -> None:
+        app = self.app
+        app._on_detect_clicked()  # runs the mode-appropriate 辨識 pass
+        self._draft.clear()
+        self._refresh()
+
+    def _confirm(self) -> None:
+        app = self.app
+        last = app._last
+        b = _Baseline(
+            exp_cur=self._draft.get("exp", last.exp_cur),
+            exp_pct=last.exp_pct,
+            hp_cur=self._draft.get("hp", last.hp_cur),
+            hp_max=last.hp_max,
+            mp_cur=self._draft.get("mp", last.mp_cur),
+            mp_max=last.mp_max,
+            level=last.level,
+            meso=self._draft.get("meso", app._last_meso),
+            hp_potion=self._draft.get("hp_potion", app._last_hp_slot_count),
+            mp_potion=self._draft.get("mp_potion", app._last_mp_slot_count),
+        )
+        self.result = b
+        self.top.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.top.destroy()

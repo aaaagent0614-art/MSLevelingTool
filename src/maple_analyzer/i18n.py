@@ -61,14 +61,17 @@ _STRINGS: dict[str, dict[Lang, str]] = {
 
     "history_empty": {"en": "No sessions yet", "zh": "尚無紀錄"},
     "history_session": {"en": "SESSION #{n}", "zh": "紀錄 #{n}"},
-    "history_hp_potion": {"en": "HP POTION", "zh": "HP 藥水"},
-    "history_mp_potion": {"en": "MP POTION", "zh": "MP 藥水"},
+    "history_hp_potion": {"en": "HP", "zh": "HP"},
+    "history_mp_potion": {"en": "MP", "zh": "MP"},
     "history_meso": {"en": "MESO", "zh": "楓幣"},
-    # Meso-cell breakdown labels on a History card (2026-09-02): the headline
-    # is the net total (drop + item sale - potion spend), these are its parts.
-    "history_meso_wild": {"en": "Drop {n}", "zh": "掉落 {n}"},
-    "history_meso_equip": {"en": "Item {n}", "zh": "道具 {n}"},
-    "history_potion_spend": {"en": "Potion {n}", "zh": "藥水 {n}"},
+    # Long-list History card rows (2026-09-02).
+    "history_exp_label": {"en": "Gained", "zh": "變化量"},
+    "history_exp_pct_label": {"en": "Percent", "zh": "百分比"},
+    "history_potions_section": {"en": "POTIONS", "zh": "藥水消耗"},
+    "history_bottle_unit": {"en": "", "zh": "罐"},
+    "history_pure_meso": {"en": "Meso drops", "zh": "純楓幣"},
+    "history_item_sales": {"en": "Item sales", "zh": "裝備與掉落"},
+    "history_total_income": {"en": "Net income", "zh": "總收入"},
     "history_exp": {"en": "EXP", "zh": "經驗值"},
     "history_exp_per_min": {"en": "EXP/MIN", "zh": "經驗/分"},
     "history_restarted_early": {"en": "restarted early", "zh": "提前重啟"},
@@ -240,6 +243,7 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     # the session whose drops are being sold).
     "kv_meso_sale": {"en": "Sale revenue", "zh": "賣裝收益"},
     "kv_meso_total": {"en": "Total meso", "zh": "總收益"},
+    "potion_setup_hint": {"en": "Potion slots not set — click to configure", "zh": "藥水格尚未設定 — 點此前往設定"},
     "kv_potion_cost": {"en": "Potion cost", "zh": "藥水成本"},
     "kv_net_meso": {"en": "Net meso", "zh": "淨收益"},
     "record_sale_button": {"en": "Record Sale", "zh": "記錄賣裝"},
@@ -258,21 +262,29 @@ _STRINGS: dict[str, dict[Lang, str]] = {
         "zh": "尚未計算裝備收益，是否開始新的紀錄？",
     },
 
-    # Pre-start checks (2026-09-02): warn when a data source the session is
-    # supposed to track was never seen -- the meso counter only exists while
-    # the inventory is open, and the quick-slot potion count needs the slot
-    # set AND the quickbar visible. Ask, don't block: the player may be
-    # deliberately skipping that metric this session.
-    "start_warn_meso_title": {"en": "Meso counter not detected", "zh": "沒有偵測到楓幣"},
-    "start_warn_meso_prompt": {
-        "en": "The meso counter hasn't been read yet -- it only exists while the inventory (I) is open. Open the inventory so the counter can be read, then Start. Start anyway?",
-        "zh": "沒有偵測到楓幣——楓幣數字只在開啟道具欄（I）時出現。請開啟道具欄讓程式讀到數字。仍要開始嗎？",
+    # Pre-start confirm dialog (2026-09-02, replaces the earlier per-source
+    # warning popups): the player sees exactly what will become this session's
+    # baseline and can confirm / re-detect / hand-edit before Start.
+    "start_confirm_title": {"en": "Confirm starting values", "zh": "確認起始數值"},
+    "start_confirm_hint": {
+        "en": "These readings become this session's baseline. Tap a value to correct it, or press 重新偵測 after opening the inventory.",
+        "zh": "以下數值將作為本場紀錄的基準。點數值可手動修改；開啟道具欄後可按「重新偵測」重新讀取。",
     },
-    "start_warn_potion_title": {"en": "Potion count not detected", "zh": "沒有偵測到藥水數量"},
-    "start_warn_potion_prompt": {
-        "en": "No count was read for the {kind} potion slot. Make sure the potion is in the selected quickbar slot and press 辨識/Detect to read it. Start anyway?",
-        "zh": "沒有偵測到 {kind} 藥水數量。請確認藥水放在選定的快捷鍵格子，並按「辨識」讀取數量。仍要開始嗎？",
+    "start_confirm_exp": {"en": "EXP", "zh": "EXP"},
+    "start_confirm_hp": {"en": "HP", "zh": "HP"},
+    "start_confirm_mp": {"en": "MP", "zh": "MP"},
+    "start_confirm_meso": {"en": "Meso", "zh": "楓幣"},
+    "start_confirm_hp_potion": {"en": "HP potions", "zh": "HP 藥水"},
+    "start_confirm_mp_potion": {"en": "MP potions", "zh": "MP 藥水"},
+    "start_confirm_missing": {"en": "not detected", "zh": "未偵測到"},
+    "start_confirm_redetect": {"en": "Re-detect", "zh": "重新偵測"},
+    "start_confirm_start": {"en": "Start", "zh": "開始記錄"},
+    "start_confirm_edit_title": {"en": "Correct value", "zh": "手動修改"},
+    "start_confirm_edit_prompt": {
+        "en": "Type the correct value (empty = back to auto)",
+        "zh": "輸入正確數值（留空 = 恢復自動讀取）",
     },
+    "cancel": {"en": "Cancel", "zh": "取消"},
 
     # Compact overlay metric labels (derived values the game itself doesn't
     # show -- the game already renders live HP/MP bars, so the small window

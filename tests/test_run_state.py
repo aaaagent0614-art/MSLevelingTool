@@ -144,6 +144,7 @@ class _StubApp:
         self._last_hp_slot_count: int | None = None
         self._last_mp_slot_count: int | None = None
         self._sale_done = False
+        self._baseline = overlay_module._Baseline()
 
         self.rebuild_calls = 0
 
@@ -194,6 +195,12 @@ class _StubApp:
     _commit_session_to_history = OverlayApp._commit_session_to_history
     _finalize_and_maybe_stop = OverlayApp._finalize_and_maybe_stop
     _start_session_with_current_values = OverlayApp._start_session_with_current_values
+    _start_session_with_baseline = OverlayApp._start_session_with_baseline
+
+    def _confirm_start_baseline(self):
+        # Run-state tests don't drive the real confirm dialog; auto-confirm an
+        # empty baseline. Tests that exercise cancel/confirm override this.
+        return overlay_module._Baseline()
     _refresh_compare_tab = OverlayApp._refresh_compare_tab
     _stop_into_pending = OverlayApp._stop_into_pending
     _commit_pending_session = OverlayApp._commit_pending_session
@@ -537,32 +544,33 @@ def test_close_commits_pending_session():
     assert len(app._session_history) == 1
 
 
-def test_start_prompts_when_meso_never_detected_and_cancel_stays_stopped(monkeypatch):
-    """Pre-start check (2026-09-02): with meso tracking on but the counter
-    never read, Start asks first; answering No keeps the app stopped."""
+def test_start_cancel_from_confirm_dialog_stays_stopped(monkeypatch):
+    """Pre-start confirm dialog (2026-09-02): cancelling keeps the app
+    stopped and does not touch the pending session."""
     app = _StubApp()
-    app._settings.track_meso = True
-    app._last_meso = None
-    calls = []
-    monkeypatch.setattr(
-        overlay_module.messagebox, "askyesno",
-        lambda *a, **kw: calls.append(True) or False,  # user says No
-    )
-    app._on_pause_button_clicked()  # Start
-    assert calls == [True]           # the missing-meso prompt appeared
+    monkeypatch.setattr(app, "_confirm_start_baseline", lambda: None)  # cancel
+    app._on_pause_button_clicked()  # Start -> dialog -> cancelled
     assert app._run_state == "stopped"
     assert not app._session_pending
 
 
-def test_start_skips_meso_prompt_when_counter_was_read(monkeypatch):
+def test_start_confirmed_baseline_seeds_session(monkeypatch):
+    """Confirming the dialog starts the session with the baseline's meso and
+    quick-slot counts seeded as endpoints (the inventory closes after)."""
     app = _StubApp()
-    app._settings.track_meso = True
-    app._last_meso = 1_234_567
-    calls = []
-    monkeypatch.setattr(
-        overlay_module.messagebox, "askyesno",
-        lambda *a, **kw: calls.append(True) or False,
-    )
+    b = overlay_module._Baseline(meso=1_234_567, hp_potion=30, mp_potion=10)
+    monkeypatch.setattr(app, "_confirm_start_baseline", lambda: b)
     app._on_pause_button_clicked()
-    assert calls == []               # no prompt when meso was seen before
     assert app._run_state == "running"
+    assert app._baseline is b
+    # The seeds survive the calibration window (record_meso/record_potion are
+    # no-ops until Session's clock starts, but the endpoints already stand).
+    assert app._session.start_meso == 1_234_567
+    assert app._session._hp_slot_start == 30
+    assert app._session._mp_slot_start == 10
+    # After calibration, an end reading diffs against the seeded baseline.
+    _calibrate(app)
+    app._session.record_meso(1_240_000)
+    app._session.record_potion("hp", 25)
+    assert app._session.meso_gained == 5_433
+    assert app._session.hp_potion_consumed == 5

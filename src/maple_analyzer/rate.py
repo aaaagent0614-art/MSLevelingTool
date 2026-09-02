@@ -426,12 +426,27 @@ class Session:
         self._mp_slot_start: int | None = None
         self._mp_slot_end: int | None = None
 
-    def start(self, now: float | None = None) -> None:
+    def start(
+        self,
+        now: float | None = None,
+        initial_meso: int | None = None,
+        initial_hp_potion: int | None = None,
+        initial_mp_potion: int | None = None,
+    ) -> None:
         """Begin a new session. Carries forward whatever EXP/HP/MP values are
         already known as the new baseline (so a level-up-triggered or
         timer-triggered restart doesn't wait a tick to re-establish it) --
         unless calibration has never completed, in which case there is
-        nothing yet to carry forward and the clock stays off until it does."""
+        nothing yet to carry forward and the clock stays off until it does.
+
+        initial_meso / initial_hp_potion / initial_mp_potion come from the
+        pre-start confirm dialog (2026-09-02): the meso counter and quick-slot
+        counts only exist while the inventory is open, and the player opens it
+        BEFORE Start -- after Start the inventory may be closed and those
+        baselines could never be re-read. Setting them here survives the
+        calibration window: while _start_time is still None record_meso /
+        record_potion no-op, but the seeded endpoints already stand, so the
+        first reading after calibration lands as the END value."""
         if self._require_calibration and not self._calibrated:
             self._start_time = None
         else:
@@ -449,17 +464,18 @@ class Session:
         self._resume_pending = False
         # A fresh session starts with no meso endpoints -- the user opens
         # the inventory after Start to establish the baseline (see
-        # record_meso's docstring).
-        self._start_meso = None
+        # record_meso's docstring). The pre-start confirm dialog's readings
+        # (inventory was open for 辨識) override that: see the docstring.
+        self._start_meso = initial_meso
         self._end_meso = None
         self._sale_revenue = 0
         self._last_sale_meso = None
         # Quick-slot potion counter (2026-09-02): first reading after start is
         # the baseline, every later reading updates the end value, so the last
         # reading before finalize is the end point (same shape as meso).
-        self._hp_slot_start = None
+        self._hp_slot_start = initial_hp_potion
         self._hp_slot_end = None
-        self._mp_slot_start = None
+        self._mp_slot_start = initial_mp_potion
         self._mp_slot_end = None
 
     def sync_known(
