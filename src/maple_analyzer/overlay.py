@@ -2245,7 +2245,7 @@ class OverlayApp:
             self._stop_into_pending()
         else:
             self._commit_session_to_history()
-            self._session.start()
+            self._start_session_with_current_values()
 
     def _stop_into_pending(self) -> None:
         """Freeze the session WITHOUT committing it to History, leaving it
@@ -2280,7 +2280,7 @@ class OverlayApp:
     def _on_restart_clicked(self) -> None:
         if self._settings.save_on_restart:
             self._commit_session_to_history()
-        self._session.start()  # resets pause state too, so a restart from "paused" lands in "running"
+        self._start_session_with_current_values()  # resets pause state too, so a restart from "paused" lands in "running"
         self._run_state = "running"
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
@@ -2291,6 +2291,24 @@ class OverlayApp:
         # proceeds against it. Commit happens on the next Start (or app close).
         self._stop_into_pending()
         self._render(self._last)  # immediate feedback, don't wait for next tick
+
+    def _start_session_with_current_values(self) -> None:
+        """Begin a new session, seeding the engine with the UI's latest
+        OCR'd readings first (sync_known).
+
+        The UI OCRs continuously even while stopped, so the current screen
+        state is richer than the engine's own memory (which froze at the
+        previous session's end -- or is empty on first launch). Without this
+        hand-off the new session's baseline would be stale/absent and the
+        compact window's numbers would look re-detected from scratch
+        (reported 2026-09-02)."""
+        self._session.sync_known(
+            exp_cur=self._last.exp_cur, hp_cur=self._last.hp_cur,
+            mp_cur=self._last.mp_cur, exp_pct=self._last.exp_pct,
+            hp_max=self._last.hp_max, mp_max=self._last.mp_max,
+            level=self._last.level,
+        )
+        self._session.start()
 
     def _on_pause_button_clicked(self) -> None:
         """One button, three roles depending on _run_state -- see
@@ -2345,7 +2363,7 @@ class OverlayApp:
                     ):
                         return
             self._commit_pending_session()
-            self._session.start()
+            self._start_session_with_current_values()
             self._sale_done = False  # new session: 賣裝收益/淨收益 reset
             self._run_state = "running"
         self._apply_run_state()
@@ -2455,16 +2473,16 @@ class OverlayApp:
         win.title("MsStatTractor")
         win.attributes("-topmost", True)
         win.configure(fg_color=BG)
-        # 360x300 (was 280x270): the three buttons in one row used to get
-        # squeezed to ~85px each at 120% scale, compressing their labels --
-        # the reported "按鈕被壓縮很小" (2026-08-26). The extra width gives
-        # Pause/Stop/Restore comfortable room and the extra height fits the
-        # comparison line added alongside.
+        # 360x350 (was 360x300): at 120% widget scaling the four 3-line cells
+        # + timer leave less than the button row's height, so Tk squeezed the
+        # Pause/Stop/Restore buttons to ~11px -- effectively invisible
+        # (reported 2026-09-02: "小窗沒有暫停/停止按鈕"). The extra height
+        # guarantees the 34px button row its full size.
         x, y = self._settings.compact_x, self._settings.compact_y
         if x is not None and y is not None:
-            win.geometry(f"360x300+{x}+{y}")
+            win.geometry(f"360x350+{x}+{y}")
         else:
-            win.geometry("360x300+60+60")
+            win.geometry("360x350+60+60")
         win.resizable(False, False)
         win.protocol("WM_DELETE_WINDOW", self._on_restore_main)
         self._compact_win = win
@@ -2575,12 +2593,20 @@ class OverlayApp:
     def _render_compact(self, snap) -> None:
         if self._compact_win is None or not self._compact_win.winfo_exists():
             return
+        # Fall back to the UI's last 辨識/live read until the Session has its
+        # own endpoints (the first ~5s after Start, before the first scan
+        # lands) -- without this the window blinked to '--' right after Start
+        # even though the values had just been detected (reported 2026-09-02).
         hp_count = self._session.hp_slot_count
+        if hp_count is None:
+            hp_count = self._last_hp_slot_count
         self._compact_labels["hpcount"].configure(
             text=f"{hp_count:,}" if hp_count is not None else "--",
             text_color=HP_COLOR if hp_count is not None else INK_FAINT,
         )
         mp_count = self._session.mp_slot_count
+        if mp_count is None:
+            mp_count = self._last_mp_slot_count
         self._compact_labels["mpcount"].configure(
             text=f"{mp_count:,}" if mp_count is not None else "--",
             text_color=MP_COLOR if mp_count is not None else INK_FAINT,
@@ -2590,6 +2616,12 @@ class OverlayApp:
             sign = "+" if total >= 0 else "-"
             self._compact_labels["meso"].configure(
                 text=f"{sign}{abs(total):,}", text_color=EXP_COLOR if total >= 0 else HP_COLOR,
+            )
+        elif self._last_meso is not None:
+            # No session delta yet (inventory not opened since Start) -- show
+            # the latest counter value read, like the dashboard's start row.
+            self._compact_labels["meso"].configure(
+                text=f"{self._last_meso:,}", text_color=INK,
             )
         else:
             self._compact_labels["meso"].configure(text="--", text_color=INK_FAINT)

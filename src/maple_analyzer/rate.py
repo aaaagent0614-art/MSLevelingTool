@@ -462,6 +462,38 @@ class Session:
         self._mp_slot_start = None
         self._mp_slot_end = None
 
+    def sync_known(
+        self,
+        exp_cur: int | None = None,
+        hp_cur: int | None = None,
+        mp_cur: int | None = None,
+        exp_pct: float | None = None,
+        hp_max: int | None = None,
+        mp_max: int | None = None,
+        level: int | None = None,
+    ) -> None:
+        """Hand the UI's latest OCR'd readings to the engine BEFORE start().
+
+        The UI keeps OCRing while stopped, but the Session only receives ticks
+        once running -- so its internal _exp_cur/_hp_cur/_mp_cur stay at the
+        previous session's end values (or None on first launch). start() then
+        carries THOSE stale values forward as the new baseline, making the new
+        session's numbers look re-detected from scratch (reported 2026-09-02).
+        Call this with the UI's current _last snapshot immediately before
+        start() so the baseline is the CURRENT screen state. Only non-None
+        fields are updated; this is a pre-start hand-off, not a record."""
+        if exp_cur is not None:
+            self._exp_cur = exp_cur
+            self._last_exp = exp_cur
+        if hp_cur is not None:
+            self._hp_cur = hp_cur
+        if mp_cur is not None:
+            self._mp_cur = mp_cur
+        if level is not None:
+            self._last_level = level
+        if exp_cur and exp_pct:
+            self._total_exp = exp_cur / (exp_pct / 100)
+
     # ---- pause/resume -------------------------------------------------
 
     def pause(self, now: float | None = None) -> None:

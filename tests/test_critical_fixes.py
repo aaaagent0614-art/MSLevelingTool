@@ -211,3 +211,36 @@ def test_summary_new_potion_fields_survive_round_trip_without_them():
     assert loaded.hp_potion_used is None
     assert loaded.mp_potion_used is None
     assert loaded.potion_cost == 0
+
+
+# ---- 2026-09-02: session baseline must reflect the CURRENT screen ---------
+
+def test_sync_known_seeds_baseline_from_ui_readings_before_start():
+    """The UI OCRs while stopped; sync_known hands those readings over so a
+    restart baseline is the current screen, not the previous session's end."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)  # old session's end values
+    # Screen moved on while stopped (player kept playing / relogged): UI's
+    # _last now reads 2000/800/300, the engine still remembers 1000/500/200.
+    s.sync_known(exp_cur=2000, hp_cur=800, mp_cur=300)
+    s.start()
+    assert s.start_exp == 2000  # baseline is the CURRENT value, not 1000
+    s.record(exp_cur=2100, hp_cur=780, mp_cur=290)  # 100 EXP, 20 HP, 10 MP gained
+    assert s.exp_diff == 100   # no phantom 1100 from the stale 1000 baseline
+    assert s.hp_loss == 20
+    assert s.mp_loss == 10
+
+
+def test_sync_known_ignores_none_fields():
+    """Partial readings (some fields momentarily OCR-missing) must not wipe
+    the values the engine already holds."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.sync_known(exp_cur=1100, hp_cur=None, mp_cur=None)  # only EXP synced
+    s.start()
+    assert s.start_exp == 1100  # synced EXP became the baseline
+    # HP/MP kept their last engine values (sync didn't null them): a normal
+    # reading after start books no phantom loss.
+    s.record(exp_cur=1150, hp_cur=500, mp_cur=200)
+    assert s.hp_loss == 0
+    assert s.mp_loss == 0

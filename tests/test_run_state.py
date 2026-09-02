@@ -193,6 +193,7 @@ class _StubApp:
     _maybe_refresh_manual_meso = OverlayApp._maybe_refresh_manual_meso
     _commit_session_to_history = OverlayApp._commit_session_to_history
     _finalize_and_maybe_stop = OverlayApp._finalize_and_maybe_stop
+    _start_session_with_current_values = OverlayApp._start_session_with_current_values
     _refresh_compare_tab = OverlayApp._refresh_compare_tab
     _stop_into_pending = OverlayApp._stop_into_pending
     _commit_pending_session = OverlayApp._commit_pending_session
