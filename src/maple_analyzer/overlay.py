@@ -376,11 +376,14 @@ class OverlayApp:
         self.root.title("MsStatTractor")
         self.root.attributes("-topmost", self._settings.topmost)
         self.root.configure(fg_color=BG)
-        # Window size (2026-08-28): width is 2/3 of the old 480 (320), and the
-        # height fits the whole Dashboard (tab bar → Start button) without
-        # scrolling. The old 480x624 needed a scrollbar once the comparison
-        # card was added; that card now lives on its own tab.
-        self.root.geometry("320x660+40+40")
+        # Window size (2026-09-02): widened from 320 to 400. The 320 width was
+        # set (2026-08-28) when the compare feature was moved off the Dashboard
+        # and the whole UI was squeezed to 2/3 of the old 480; but at 120%
+        # widget scaling the Settings tab's hint text then wrapped after ~12
+        # CJK chars per line, reading as clipped ("UI 不夠寬", reported
+        # 2026-09-02). Live tab is scrollable, so a taller fixed window is no
+        # longer needed; the width now gives text room to breathe.
+        self.root.geometry("400x660+40+40")
         # Fixed, non-resizable window.
         self.root.resizable(False, False)
         # Commit any pending session + persist the compact window position on
@@ -662,10 +665,15 @@ class OverlayApp:
         # Potion card (third block, 2026-09-03): HP/MP potion slot (which
         # quickbar key) + the live potion count read from each slot. Replaces
         # the old HP/MP-loss rows -- the quickbar counter is more accurate.
+        # The whole card is hidden until the player picks at least one slot
+        # (_apply_visibility): an empty CTkFrame still requests ~132px of
+        # height, so leaving it in place when every row inside is removed
+        # renders a large blank card between EXP and meso (reported 2026-09-02).
         potion_card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12)
         potion_card.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 6))
         potion_card.grid_columnconfigure(0, weight=1)
         potion_card.grid_columnconfigure(1, weight=0)
+        self._potion_card = potion_card
         add_kv_row(potion_card, 0, "hpslot", "kv_hp_potion_slot")
         add_kv_row(potion_card, 1, "mpslot", "kv_mp_potion_slot")
         add_kv_row(potion_card, 2, "hpcount", "kv_hp_potion_count")
@@ -750,7 +758,7 @@ class OverlayApp:
         self._update_hint_label = ctk.CTkLabel(
             parent, text="", corner_radius=8, fg_color=SURFACE_2,
             text_color=EXP_COLOR, font=self._font(10, bold=True),
-            anchor="w", justify="left", wraplength=320,
+            anchor="w", justify="left", wraplength=290,
         )
         self._update_hint_label.grid(row=6, column=0, sticky="ew", padx=2, pady=(4, 2))
         self._update_hint_label.grid_remove()
@@ -760,7 +768,7 @@ class OverlayApp:
         self._compat_hint_label = ctk.CTkLabel(
             parent, text="", corner_radius=8, fg_color=SURFACE_2,
             text_color=EXP_COLOR, font=self._font(9, bold=True),
-            anchor="w", justify="left", wraplength=320,
+            anchor="w", justify="left", wraplength=290,
         )
         self._compat_hint_label.grid(row=7, column=0, sticky="ew", padx=2, pady=(0, 2))
         self._compat_hint_label.grid_remove()
@@ -1120,7 +1128,7 @@ class OverlayApp:
             command=self._on_track_meso_changed,
         ), "settings_track_meso", size=11, bold=False).pack(fill="x", padx=12, pady=0)
         self._i18n(
-            ctk.CTkLabel(card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT),
+            ctk.CTkLabel(card, anchor="w", wraplength=290, justify="left", text_color=INK_FAINT),
             "settings_track_meso_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
 
@@ -1132,7 +1140,7 @@ class OverlayApp:
             ctk.CTkLabel(potion_card, anchor="w", text_color=INK_DIM), "settings_potion", size=11, bold=True
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(5, 0))
         self._i18n(
-            ctk.CTkLabel(potion_card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT),
+            ctk.CTkLabel(potion_card, anchor="w", wraplength=290, justify="left", text_color=INK_FAINT),
             "settings_potion_hint", size=9, bold=False,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 3))
 
@@ -1179,7 +1187,7 @@ class OverlayApp:
             ctk.CTkLabel(quick_card, anchor="w", text_color=INK_DIM), "settings_quick_slot", size=11, bold=True
         ).pack(fill="x", padx=12, pady=(5, 0))
         self._i18n(
-            ctk.CTkLabel(quick_card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT),
+            ctk.CTkLabel(quick_card, anchor="w", wraplength=290, justify="left", text_color=INK_FAINT),
             "settings_quick_slot_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
 
@@ -1255,12 +1263,12 @@ class OverlayApp:
         self._meso_region_button.pack(fill="x", padx=12, pady=(0, 3))
 
         self._manual_status_label = ctk.CTkLabel(
-            manual_card, anchor="w", wraplength=210, justify="left", text_color=INK_FAINT,
+            manual_card, anchor="w", wraplength=290, justify="left", text_color=INK_FAINT,
             font=self._font(9, bold=False),
         )
         self._manual_status_label.pack(fill="x", padx=12, pady=(0, 3))
         self._manual_warning_label = ctk.CTkLabel(
-            manual_card, anchor="w", wraplength=210, justify="left", text_color=HP_COLOR,
+            manual_card, anchor="w", wraplength=290, justify="left", text_color=HP_COLOR,
             font=self._font(9, bold=True),
         )
         self._manual_warning_label.pack(fill="x", padx=12, pady=(0, 5))
@@ -1604,6 +1612,14 @@ class OverlayApp:
         # The meso hint only makes sense when meso tracking is on.
         if getattr(self, "_meso_hint_label", None) is not None:
             self._meso_hint_label.grid() if s.track_meso else self._meso_hint_label.grid_remove()
+
+        # Potion card as a WHOLE is hidden while no quickbar slot is picked:
+        # its rows are all removed by the kv loop above, but an empty
+        # CTkFrame still requests ~132px and leaves a blank card on the
+        # dashboard (reported 2026-09-02).
+        if getattr(self, "_potion_card", None) is not None:
+            potion_on = bool(s.hp_quick_slot_index or s.mp_quick_slot_index)
+            self._potion_card.grid() if potion_on else self._potion_card.grid_remove()
 
     # ---- tick loop ---------------------------------------------------------
 
