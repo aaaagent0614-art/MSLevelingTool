@@ -2529,6 +2529,24 @@ class OverlayApp:
 
     # ---- compact 2x2 overlay --------------------------------------------
 
+    def _centered_on_main(self, w: int, h: int) -> str:
+        """'WxH+X+Y' geometry that centres the window on the MAIN window's
+        actual screen rect. Multi-monitor safe: uses winfo_rootx/y of the
+        main window (which may live on a secondary monitor), never a
+        hardcoded primary-screen offset -- the old +120+120 / +60+60 put
+        dialogs on the primary display even when the user played on another
+        screen (reported 2026-09-02)."""
+        try:
+            x = self.root.winfo_rootx()
+            y = self.root.winfo_rooty()
+            mw = self.root.winfo_width()
+            mh = self.root.winfo_height()
+        except Exception:
+            x, y, mw, mh = 60, 60, 400, 660
+        cx = max(0, x + (mw - w) // 2)
+        cy = max(0, y + (mh - h) // 2)
+        return f"{w}x{h}+{cx}+{cy}"
+
     def _ensure_compact_win(self) -> None:
         """Create the small always-on-top overlay (once). Shows the *derived*
         metrics the game itself doesn't display -- HP/MP consumption, meso
@@ -2549,7 +2567,11 @@ class OverlayApp:
         if x is not None and y is not None:
             win.geometry(f"360x410+{x}+{y}")
         else:
-            win.geometry("360x410+60+60")
+            # First run (no saved placement): centre on the main window so a
+            # secondary-monitor setup opens the overlay on the screen the
+            # user is actually using (2026-09-02). Once dragged, the spot is
+            # remembered in compact_x/y.
+            win.geometry(self._centered_on_main(360, 410))
         win.resizable(False, False)
         win.protocol("WM_DELETE_WINDOW", self._on_restore_main)
         self._compact_win = win
@@ -3355,7 +3377,9 @@ class _StartBaselineDialog:
         self.top.title("MsStatTractor")
         self.top.attributes("-topmost", True)
         self.top.configure(fg_color=BG)
-        self.top.geometry("380x330+120+120")
+        # Tall enough that the button row keeps full size, centred on the main
+        # window (dual-monitor: opens on the screen the user is actually on).
+        self.top.geometry(app._centered_on_main(380, 460))
         self.top.resizable(False, False)
         self.top.transient(app.root)
         self.top.protocol("WM_DELETE_WINDOW", self._cancel)
