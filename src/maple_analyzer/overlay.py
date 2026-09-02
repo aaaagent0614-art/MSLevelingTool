@@ -122,25 +122,35 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
+# Tick cadence (2026-09-02): running tick halved from 2Hz to 1Hz. Per-tick
+# work (4x recognition OCR ~60ms + capture) was measuring ~12%+ CPU at 2Hz,
+# and the always-on 20-30% the user saw under Task Manager. A 1s resolution
+# is plenty for this game's data: EXP climbs a few hundred/minute, HP/MP
+# drops land a second late at worst, and the loss tracker's outlier guard
+# absorbs it (a >50% bar move in one second is already a corner case).
+TARGET_MS = 1000  # target full tick cycle -- 1Hz (was 2Hz)
 # Stopped/idle tick cadence. While stopped nothing is being recorded -- the
-# HUD only keeps the live OCR readouts fresh -- so a 1Hz cycle is plenty and
-# halves the idle CPU/GPU load (see _do_tick's return).
-TARGET_MS_IDLE = 1000
+# HUD only keeps the live OCR readouts fresh -- so a 2s cycle is plenty and
+# keeps idle CPU near zero (see _do_tick's return).
+TARGET_MS_IDLE = 2000
 # Background locator cadence. Each pass runs full-frame *detection* OCR
 # (~600ms+) in a daemon thread to re-find the stat panel fields and the
 # meso counter, so the tick thread only ever does cheap recognition reads
-# on cached boxes. Every 10 ticks = ~5s. Also what makes the HUD survive
-# screen magnifiers (Megapipe): the detected positions track the rescaled
-# layout every pass.
-LOCATE_INTERVAL_TICKS = 10
+# on cached boxes. Every 30 ticks = ~30s at 1Hz (was every 5s). Detection
+# was ~12% CPU amortized; the stat layout is stable while grinding, and the
+# user can always force a re-locate with the 辨識 button. Also what makes
+# the HUD survive screen magnifiers (Megapipe): a zoom change re-settles
+# within 30s.
+LOCATE_INTERVAL_TICKS = 30
 # How often (in ticks) manual mode re-reads the meso counter via cheap
 # recognition-only OCR on the marked meso region (~15ms) -- no detection, so
 # no CPU spike like the locator's periodic detection pass used to cause.
-MESO_SCAN_INTERVAL_TICKS = 10
+# 5 ticks @ 1Hz = ~5s, the cadence the 2Hz-era 10 ticks used to give.
+MESO_SCAN_INTERVAL_TICKS = 5
 # Same cadence for the quick-slot potion counter (2026-09-02): recognition-
-# only OCR on the marked slot, throttled so a session reads ~every 5s.
-QUICK_SLOT_SCAN_INTERVAL_TICKS = 10
+# only OCR on the marked slot, throttled so a session reads ~every 5s
+# (5 ticks @ 1Hz).
+QUICK_SLOT_SCAN_INTERVAL_TICKS = 5
 
 # The quickbar is 8 slots laid out as two rows of four (2026-09-03), each
 # keyed by a keyboard key. Slot 1-4 are the top row (left→right), 5-8 the
@@ -1796,8 +1806,8 @@ class OverlayApp:
         self._render(merged)
         self._maybe_refresh_manual_meso()
         self._maybe_scan_quick_slot()
-        # While stopped nothing is recorded -- throttle to 1Hz to halve idle
-        # CPU/GPU load (see TARGET_MS_IDLE). Running/paused keep the 2Hz rate.
+        # While stopped nothing is recorded -- throttle to 0.5Hz to keep idle
+        # CPU near zero (see TARGET_MS_IDLE). Running/paused keep the 1Hz rate.
         target = TARGET_MS_IDLE if self._run_state == "stopped" else TARGET_MS
         elapsed_ms = (time.perf_counter() - t0) * 1000
         return max(0, int(target - elapsed_ms))

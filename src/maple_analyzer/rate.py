@@ -184,7 +184,7 @@ class _LossTracker:
     is a no-op, exactly like a tick with no maximum at all.
     """
 
-    # Fraction of max MP/HP a single 500ms tick may move before the reading
+    # Fraction of max MP/HP a single tick (1Hz) may move before the reading
     # is treated as suspect. Generous on purpose: this only decides what needs
     # corroboration, not what counts, so a real big hit still lands (one tick
     # late) while digit-truncation misreads -- which are always wrong by most
@@ -677,7 +677,7 @@ class Session:
             self._last_implied_total = implied
             return True
         # No percentage to check against: fall back to the one bound that needs
-        # no cross-reference -- a single 500ms tick cannot gain a whole level.
+        # no cross-reference -- a single 1s tick cannot gain a whole level.
         if self._total_exp and self._last_exp is not None:
             if abs(exp_cur - self._last_exp) > self._total_exp:
                 return False
