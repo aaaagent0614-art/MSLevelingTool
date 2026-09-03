@@ -1,15 +1,18 @@
-"""Potion cost / net income (2026-08-28): configured HP/MP potion prices turn
-HP/MP loss into 藥水成本 and 淨收益 (meso − potion cost) on the Dashboard and
-the compact overlay's meso cell."""
+"""Potion cost / net income (2026-08-28, simplified 2026-09-03): configured
+HP/MP potion unit prices turn consumed bottles into 藥水成本 and 淨收益
+(meso − potion cost) on the Dashboard and the compact overlay's meso cell.
+Since 2026-09-03 the cost comes ONLY from the quick-slot counter (bottles
+actually consumed × price): HP/MP readings retired, so the old loss/restore
+estimate has no input and is gone."""
 from __future__ import annotations
 
 from test_run_state import _StubApp
 
 
-def _app_with_losses(hp: int = 0, mp: int = 0) -> _StubApp:
+def _app_with_prices(hp: int = 0, mp: int = 0) -> _StubApp:
     app = _StubApp()
-    app._session._hp.loss = hp
-    app._session._mp.loss = mp
+    app._settings.hp_potion_price = hp
+    app._settings.mp_potion_price = mp
     return app
 
 
@@ -19,46 +22,50 @@ def test_potion_disabled_by_default():
     assert app._potion_cost() == 0
 
 
-def test_potion_enabled_requires_price_and_restore():
-    app = _app_with_losses(hp=100)
-    app._settings.hp_potion_price = 100
-    assert app._potion_enabled() is False  # restore still 0
-    app._settings.hp_potion_restore = 50
-    assert app._potion_enabled() is True
+def test_potion_enabled_by_price_only():
+    # A unit price alone turns the stat's cost on; no restore amount anymore.
+    assert _app_with_prices(hp=100)._potion_enabled() is True
+    assert _app_with_prices(mp=500)._potion_enabled() is True
 
 
-def test_potion_cost_ceil_bottles():
-    app = _app_with_losses(hp=1000, mp=500)
-    app._settings.hp_potion_price = 100
-    app._settings.hp_potion_restore = 300  # 1000 -> 4 bottles (ceil)
-    app._settings.mp_potion_price = 200
-    app._settings.mp_potion_restore = 300  # 500 -> 2 bottles (ceil)
-    assert app._potion_cost() == 4 * 100 + 2 * 200  # 800
-
-
-def test_potion_cost_exact_bottles_no_extra():
-    app = _app_with_losses(hp=600, mp=0)
-    app._settings.hp_potion_price = 150
-    app._settings.hp_potion_restore = 300  # exactly 2 bottles
-    assert app._potion_cost() == 300
-
-
-def test_potion_cost_zero_loss():
-    app = _app_with_losses(hp=0, mp=0)
-    app._settings.hp_potion_price = 100
-    app._settings.hp_potion_restore = 300
+def test_potion_cost_zero_without_quick_slot_reads():
+    # Prices configured but no quickbar slot was read (or none picked): cost
+    # stays 0 -- there is no loss-based estimate to fall back on (2026-09-03).
+    app = _app_with_prices(hp=100, mp=200)
+    app._session._calibrated = True
+    app._session.start()
     assert app._potion_cost() == 0
 
 
-def test_mp_only_configuration():
-    app = _app_with_losses(hp=1000, mp=100)
+def test_potion_cost_uses_consumed_bottles_only():
+    app = _StubApp()
+    app._session._calibrated = True
+    app._session.start()
+    app._settings.hp_quick_slot_index = 3
+    app._settings.mp_quick_slot_index = 7
+    app._settings.hp_potion_price = 320
+    app._settings.mp_potion_price = 200
+    app._session.record_potion("hp", 50)
+    app._session.record_potion("hp", 42)  # 8 HP bottles
+    app._session.record_potion("mp", 30)
+    app._session.record_potion("mp", 25)  # 5 MP bottles
+    assert app._potion_cost() == 8 * 320 + 5 * 200
+
+
+def test_potion_cost_hp_only_configuration():
+    # MP has a price but no slot picked -> contributes nothing.
+    app = _StubApp()
+    app._session._calibrated = True
+    app._session.start()
+    app._settings.hp_quick_slot_index = 1
+    app._settings.hp_potion_price = 150
     app._settings.mp_potion_price = 500
-    app._settings.mp_potion_restore = 100
-    assert app._potion_enabled() is True
-    assert app._potion_cost() == 1 * 500  # HP potion not configured -> ignored
+    app._session.record_potion("hp", 10)
+    app._session.record_potion("hp", 6)  # 4 HP bottles
+    assert app._potion_cost() == 4 * 150
 
 
-# ---- quick-slot potion counter (2026-09-02, reworked 2026-09-03) ----------
+# ---- quick-slot potion counter engine (2026-09-02, reworked 2026-09-03) ----
 
 
 def _running_app() -> _StubApp:
@@ -88,41 +95,6 @@ def test_potion_noop_before_start():
     app = _StubApp()  # session never started
     app._session.record_potion("hp", 50)
     assert app._session.hp_potion_consumed is None
-
-
-def test_potion_cost_prefers_quick_slot_path():
-    app = _running_app()
-    app._settings.hp_quick_slot_index = 3
-    app._settings.mp_quick_slot_index = 7
-    app._settings.hp_potion_price = 320
-    app._settings.mp_potion_price = 200
-    app._session.record_potion("hp", 50)
-    app._session.record_potion("hp", 42)  # 8 HP bottles
-    app._session.record_potion("mp", 30)
-    app._session.record_potion("mp", 25)  # 5 MP bottles
-    assert app._potion_cost() == 8 * 320 + 5 * 200
-
-
-def test_potion_cost_falls_back_to_loss_estimate_without_reads():
-    app = _running_app()
-    app._settings.hp_quick_slot_index = 3
-    app._settings.hp_potion_price = 100
-    app._settings.hp_potion_restore = 300
-    app._session._hp.loss = 1000
-    assert app._potion_cost() == 4 * 100  # quick-slot has no readings yet
-
-
-def test_potion_cost_mixed_paths():
-    # HP uses quick-slot, MP falls back to loss estimate.
-    app = _running_app()
-    app._settings.hp_quick_slot_index = 1
-    app._settings.hp_potion_price = 320
-    app._settings.mp_potion_price = 200
-    app._settings.mp_potion_restore = 300
-    app._session.record_potion("hp", 50)
-    app._session.record_potion("hp", 42)  # 8 HP bottles
-    app._session._mp.loss = 600  # 2 MP bottles via loss estimate
-    assert app._potion_cost() == 8 * 320 + 2 * 200
 
 
 def test_read_slot_counts_off_when_unconfigured():

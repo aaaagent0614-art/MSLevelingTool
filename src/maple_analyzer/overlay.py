@@ -221,14 +221,10 @@ def _fmt_loss(loss: int) -> str:
 class _Baseline:
     """The pre-start snapshot the player confirmed (or hand-edited) in the
     start dialog: everything the new session's numbers are measured against.
-    EXP/HP/MP mirror the latest OCR snapshot; meso + quick-slot counts were
+    EXP mirrors the latest OCR snapshot; meso + quick-slot counts were
     read while the inventory was open (they can't be re-read after Start)."""
     exp_cur: int | None = None
     exp_pct: float | None = None
-    hp_cur: int | None = None
-    hp_max: int | None = None
-    mp_cur: int | None = None
-    mp_max: int | None = None
     level: int | None = None
     meso: int | None = None
     hp_potion: int | None = None
@@ -269,7 +265,6 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
     return (
         f"#{index} ({dur_s}): "
         f"EXP {start_s} -> {end_s} ({diff_s}{pct_s})  "
-        f"HP {_fmt_loss(s.hp_loss)}  MP {_fmt_loss(s.mp_loss)}  "
         f"Meso {meso_s}"
     )
 
@@ -1187,8 +1182,11 @@ class OverlayApp:
             "settings_track_meso_hint", size=9, bold=False,
         ).pack(fill="x", padx=12, pady=(0, 3))
 
-        # POTION COST (2026-08-28): unit price + restore amount per potion.
-        # When set, the Dashboard shows 藥水成本 and 淨收益 (meso − potion).
+        # POTION COST (2026-08-28, simplified 2026-09-03): unit price per
+        # potion. When set, the Dashboard shows 藥水成本 = bottles actually
+        # consumed from the quickbar (start − end count) × unit price, and
+        # 淨收益 (meso − potion). The old per-bottle restore amount is gone:
+        # HP/MP readings retired, so a loss-based estimate has no input.
         potion_card = ctk.CTkFrame(scroll, fg_color=SURFACE, corner_radius=12)
         potion_card.pack(fill="x", padx=2, pady=(4, 2))
         self._i18n(
@@ -1227,9 +1225,7 @@ class OverlayApp:
             entry.bind("<KeyRelease>", on_change)
 
         add_potion_entry(2, "settings_hp_potion_price", "hp_potion_price")
-        add_potion_entry(3, "settings_hp_potion_restore", "hp_potion_restore")
-        add_potion_entry(4, "settings_mp_potion_price", "mp_potion_price")
-        add_potion_entry(5, "settings_mp_potion_restore", "mp_potion_restore")
+        add_potion_entry(3, "settings_mp_potion_price", "mp_potion_price")
         potion_card.grid_columnconfigure(0, weight=1)
 
         # QUICK-SLOT POTION (2026-09-02, reworked 2026-09-03): pick which of
@@ -2357,17 +2353,13 @@ class OverlayApp:
         recording those readings as the compact window's 初始 baseline."""
         self._baseline = _Baseline(
             exp_cur=self._last.exp_cur, exp_pct=self._last.exp_pct,
-            hp_cur=self._last.hp_cur, hp_max=self._last.hp_max,
-            mp_cur=self._last.mp_cur, mp_max=self._last.mp_max,
             level=self._last.level,
             # meso/potion NOT seeded here: unlike the confirm-dialog path the
             # inventory is usually closed mid-grind, so a stale reading would
             # poison the baseline. They stay None until the inventory reopens.
         )
         self._session.sync_known(
-            exp_cur=self._last.exp_cur, hp_cur=self._last.hp_cur,
-            mp_cur=self._last.mp_cur, exp_pct=self._last.exp_pct,
-            hp_max=self._last.hp_max, mp_max=self._last.mp_max,
+            exp_cur=self._last.exp_cur, exp_pct=self._last.exp_pct,
             level=self._last.level,
         )
         self._session.start()
@@ -2384,8 +2376,7 @@ class OverlayApp:
         confirmed EXP/HP/MP; meso/potion counts seed the endpoints directly
         (inventory will likely be closed once grinding starts)."""
         self._session.sync_known(
-            exp_cur=b.exp_cur, hp_cur=b.hp_cur, mp_cur=b.mp_cur,
-            exp_pct=b.exp_pct, hp_max=b.hp_max, mp_max=b.mp_max, level=b.level,
+            exp_cur=b.exp_cur, exp_pct=b.exp_pct, level=b.level,
         )
         self._session.start(
             initial_meso=b.meso,
@@ -3102,38 +3093,25 @@ class OverlayApp:
 
     def _potion_enabled(self) -> bool:
         """True when the player has configured potion prices (see the
-        Settings tab's 藥水成本 card). Both price and restore must be >0 for
-        a stat's cost to count."""
+        Settings tab's 藥水成本 card). A price >0 turns a stat's cost on."""
         s = self._settings
-        return (s.hp_potion_restore > 0 and s.hp_potion_price > 0) or (
-            s.mp_potion_restore > 0 and s.mp_potion_price > 0
-        )
+        return s.hp_potion_price > 0 or s.mp_potion_price > 0
 
     def _potion_cost(self) -> int:
-        """Session potion spend.
+        """Session potion spend, from the quick-slot counter only (2026-09-03:
+        HP/MP readings retired, so the loss-based estimate is gone).
 
-        Two paths per stat (HP and MP independently):
-        - Quick-slot path (2026-09-02, reworked 2026-09-03): when the player
-          picked a quickbar slot and the counter has been read at both ends,
-          cost = bottles consumed × the unit price -- the real number.
-        - Fallback: HP/MP loss estimate, bottles needed = ceil(loss /
-          restore) times the unit price (integer ceil so a partial bottle
-          counts as a full one).
-        """
+        For each stat the player picked a quickbar slot for and whose counter
+        was read at both session ends, cost = bottles consumed (start − end)
+        × unit price. Stats without a slot picked contribute nothing."""
         s = self._settings
         hp_consumed = self._session.hp_potion_consumed if s.hp_quick_slot_index else None
         mp_consumed = self._session.mp_potion_consumed if s.mp_quick_slot_index else None
         cost = 0
         if hp_consumed is not None:
             cost += hp_consumed * s.hp_potion_price
-        elif s.hp_potion_restore > 0 and self._session.hp_loss > 0:
-            bottles = (self._session.hp_loss + s.hp_potion_restore - 1) // s.hp_potion_restore
-            cost += bottles * s.hp_potion_price
         if mp_consumed is not None:
             cost += mp_consumed * s.mp_potion_price
-        elif s.mp_potion_restore > 0 and self._session.mp_loss > 0:
-            bottles = (self._session.mp_loss + s.mp_potion_restore - 1) // s.mp_potion_restore
-            cost += bottles * s.mp_potion_price
         return cost
 
     def _levelup_eta_s(self, snap: StatSnapshot) -> float | None:
@@ -3361,8 +3339,6 @@ class _StartBaselineDialog:
     # (baseline key, i18n label key, app attribute for the auto value)
     _ROWS = [
         ("exp", "start_confirm_exp", "_last", "exp_cur"),
-        ("hp", "start_confirm_hp", "_last", "hp_cur"),
-        ("mp", "start_confirm_mp", "_last", "mp_cur"),
         ("meso", "start_confirm_meso", None, "_last_meso"),
         ("hp_potion", "start_confirm_hp_potion", None, "_last_hp_slot_count"),
         ("mp_potion", "start_confirm_mp_potion", None, "_last_mp_slot_count"),
@@ -3453,12 +3429,6 @@ class _StartBaselineDialog:
                 pct = self.app._last.exp_pct
                 pct_s = f"  ({pct:.2f}%)" if pct is not None else ""
                 lbl.configure(text=f"{v:,}{pct_s}", text_color=EXP_COLOR)
-            elif key == "hp":
-                mx = self.app._last.hp_max
-                lbl.configure(text=f"{v:,}" + (f"/{mx:,}" if mx else ""), text_color=HP_COLOR)
-            elif key == "mp":
-                mx = self.app._last.mp_max
-                lbl.configure(text=f"{v:,}" + (f"/{mx:,}" if mx else ""), text_color=MP_COLOR)
             elif key == "meso":
                 lbl.configure(text=f"{v:,}", text_color=EXP_COLOR)
             else:
@@ -3499,10 +3469,6 @@ class _StartBaselineDialog:
         b = _Baseline(
             exp_cur=self._draft.get("exp", last.exp_cur),
             exp_pct=last.exp_pct,
-            hp_cur=self._draft.get("hp", last.hp_cur),
-            hp_max=last.hp_max,
-            mp_cur=self._draft.get("mp", last.mp_cur),
-            mp_max=last.mp_max,
             level=last.level,
             meso=self._draft.get("meso", app._last_meso),
             hp_potion=self._draft.get("hp_potion", app._last_hp_slot_count),

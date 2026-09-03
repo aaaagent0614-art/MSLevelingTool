@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from .i18n import Lang
@@ -56,6 +56,12 @@ def save_settings(s: "Settings") -> None:
 def load_settings() -> "Settings":
     try:
         data = json.loads(settings_path().read_text(encoding="utf-8"))
+        # Drop keys this version's Settings no longer defines (e.g. the
+        # hp/mp_potion_restore fields removed 2026-09-03): Settings(**data)
+        # would otherwise TypeError and the whole file would fall through to
+        # fresh defaults, silently wiping every other setting.
+        valid = {f.name for f in fields(Settings)}
+        data = {k: v for k, v in data.items() if k in valid}
         for key in _REGION_FIELDS:
             value = data.get(key)
             data[key] = tuple(value) if value is not None else None
@@ -129,14 +135,13 @@ class Settings:
     # fourth tab with two dropdowns (see _build_compare_tab); this field is
     # kept only so old settings files still load.
     compare_start_time: float | None = None
-    # Potion cost (2026-08-28, inspired by the Bahamut exp calculator):
-    # unit price and restore amount per potion for HP and MP. When both are
-    # set (>0), the Dashboard shows 藥水成本 (ceil(loss/restore)*price for
-    # each stat) and 淨收益 (meso income minus potion cost). 0 = feature off.
+    # Potion cost (2026-08-28, simplified 2026-09-03): unit price per potion
+    # for HP and MP. When a price is set (>0), the Dashboard shows 藥水成本
+    # (bottles actually consumed from the quickbar × price) and 淨收益 (meso
+    # income minus potion cost). 0 = feature off. The old per-bottle restore
+    # amounts were removed with the HP/MP readings they estimated from.
     hp_potion_price: int = 0
-    hp_potion_restore: int = 0
     mp_potion_price: int = 0
-    mp_potion_restore: int = 0
     # Quick-slot potion tracking (2026-09-02, reworked 2026-09-03): the
     # player picks which quickbar slot (1-8, two rows of four) holds their HP
     # potion and which holds their MP potion; each slot's count is OCR'd so
