@@ -3406,15 +3406,25 @@ class _StartBaselineDialog:
 
         btns = ctk.CTkFrame(pad, fg_color="transparent")
         btns.pack(fill="x", pady=(10, 0))
-        ctk.CTkButton(btns, text=app._t("start_confirm_redetect"), command=self._redetect,
-                      fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK,
-                      height=32, font=app._font(12, bold=True)).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        ctk.CTkButton(btns, text=app._t("cancel"), command=self._cancel,
-                      fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=INK_DIM,
-                      height=32, font=app._font(12, bold=True)).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(btns, text=app._t("start_confirm_start"), command=self._confirm,
-                      fg_color=ACCENT, text_color=ACCENT_INK, hover_color="#7ff2e0",
-                      height=32, font=app._font(12, bold=True)).pack(side="left", fill="x", expand=True)
+        # Grid 3 equal columns instead of pack(side=left): CTkButton's default
+        # min width (140, *1.2 scale = 168px) made three packed buttons total
+        # ~504px > the ~356px row, so the last one got squeezed to 12px and
+        # looked missing (reported 2026-09-03). grid + sticky="ew" stretches
+        # each button to its column regardless of min width.
+        for c in range(3):
+            btns.grid_columnconfigure(c, weight=1, uniform="btns")
+        def mk(text_key, command, color=INK, fg=SURFACE_2, hover=TRACK_BG):
+            return ctk.CTkButton(
+                btns, text=app._t(text_key), command=command,
+                fg_color=fg, hover_color=hover, text_color=color,
+                height=32, font=app._font(12, bold=True),
+                # Explicit width ~96 (scaled ~115px) beats the 140 default so
+                # three columns of ~116px actually fit the row (see above).
+                width=96,
+            )
+        mk("start_confirm_redetect", self._redetect).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        mk("cancel", self._cancel, color=INK_DIM).grid(row=0, column=1, sticky="ew", padx=(0, 4))
+        mk("start_confirm_start", self._confirm, color=ACCENT_INK, fg=ACCENT, hover="#7ff2e0").grid(row=0, column=2, sticky="ew")
 
         self._refresh()
 
