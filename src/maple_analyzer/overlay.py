@@ -122,6 +122,32 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+# --- Scroll-ghost mitigation (2026-09-03, v1.9.0) ---
+# Windows Tk redraws canvas-embedded widgets asynchronously after a scroll.
+# With the library's default wheel step and fast wheel spin, several steps
+# coalesce before a redraw lands, so the user sees old text ghosting over
+# the new position while scrolling (CustomTkinter issue #1510; upstream
+# says unsolvable). Flushing an idle redraw inside every wheel step keeps
+# each painted frame complete: fast scrolling reads as stepwise but clean
+# instead of smeared. CTkScrollableFrame.__init__ binds the *current* class
+# method per instance, so this must be patched at module level before
+# OverlayApp builds any scrollable frame. Dragging the scrollbar thumb
+# still drives canvas.yview directly and is not covered here.
+_ORIG_SCROLL_WHEEL = ctk.CTkScrollableFrame._mouse_wheel_all
+
+
+def _scroll_wheel_redraw_synced(self, event):
+    _ORIG_SCROLL_WHEEL(self, event)
+    try:
+        # Flush the embedded widgets' pending redraw before the next wheel
+        # step moves the canvas again.
+        self._parent_canvas.update_idletasks()
+    except Exception:
+        pass
+
+
+ctk.CTkScrollableFrame._mouse_wheel_all = _scroll_wheel_redraw_synced
+
 # Tick cadence: 2Hz running (500ms), restored 2026-09-02 after the 1Hz
 # experiment (v1.8.4) made OCR reads visibly worse on the user's machine --
 # values misread and the higher latency made the HUD look frozen. The CPU
